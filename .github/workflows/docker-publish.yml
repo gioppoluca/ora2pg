@@ -35,10 +35,10 @@ jobs:
       - name: Set Docker image tags
         id: tags
         run: |
-          REPO=ghcr.io/${{ github.repository }}
+          REPO=ghcr.io/gioppoluca/ora2pg
           if [[ "${{ github.event_name }}" == "release" ]]; then
             TAG=${{ github.event.release.tag_name }}
           else
             TAG=latest
           fi
-          echo "IMAGE_TAG=$REPO:$TA_
+          echo "IMAGE_TAG=$REPO:$TAG" >> "$GITHUB_OUTPUT"
