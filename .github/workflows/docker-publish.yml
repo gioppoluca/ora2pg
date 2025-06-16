@@ -2,13 +2,17 @@ name: Build and Push Docker Image to GHCR
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
     paths:
       - Dockerfile
+      - oracle_analyzer.py
       - .github/workflows/docker-publish.yml
+  release:
+    types: [published]
 
 jobs:
-  build:
+  build-and-push:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -28,16 +32,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+      - name: Set Docker image tags
+        id: tags
+        run: |
+          REPO=ghcr.io/${{ github.repository }}
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG=${{ github.event.release.tag_name }}
+          else
+            TAG=latest
+          fi
+          echo "IMAGE_TAG=$REPO:$TA_
