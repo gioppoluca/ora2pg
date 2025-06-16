@@ -96,5 +96,7 @@ RUN ln -sf /opt/oracle/instantclient_${ORACLE_VERSION} ${INSTANT_CLIENT_DIR} && 
 COPY --from=builder /usr/lib/postgresql /usr/lib/postgresql
 COPY --from=builder /usr/share/postgresql/17/extension /usr/share/postgresql/17/extension
 COPY --from=builder /usr/share/doc/postgresql-doc-17/extension /usr/share/doc/postgresql-doc-17/extension
+COPY oracle_analyzer.py /usr/local/bin/oracle_analyzer.py
+RUN chmod +x /usr/local/bin/oracle_analyzer.py
 
 USER 26
