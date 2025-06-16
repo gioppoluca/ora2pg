@@ -99,4 +99,6 @@ COPY --from=builder /usr/share/doc/postgresql-doc-17/extension /usr/share/doc/po
 COPY oracle_analyzer.py /usr/local/bin/oracle_analyzer.py
 RUN chmod +x /usr/local/bin/oracle_analyzer.py
 
+# /usr/local/bin is our working dir for both script and config
+WORKDIR /usr/local/bin
 USER 26
