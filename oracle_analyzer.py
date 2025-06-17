@@ -1980,10 +1980,10 @@ DEBUG           0
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS oracle_migration.pdt_connections (
                     id SERIAL PRIMARY KEY,
-                    connection_name VARCHAR(100) UNIQUE NOT NULL,
-                    dsn VARCHAR(255) NOT NULL,
-                    username VARCHAR(100) NOT NULL,
-                    schema VARCHAR(100),
+                    connection_name TEXT UNIQUE NOT NULL,
+                    dsn TEXT NOT NULL,
+                    username TEXT NOT NULL,
+                    schema TEXT,
                     description TEXT,
                     is_dba BOOLEAN DEFAULT FALSE,
                     analyze_all_schemas BOOLEAN DEFAULT FALSE,
@@ -2000,13 +2000,13 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    source_owner VARCHAR(100),
-                    source_name VARCHAR(255),
-                    source_type VARCHAR(50),
-                    target_owner VARCHAR(100),
-                    target_name VARCHAR(255),
-                    target_type VARCHAR(50),
-                    db_link VARCHAR(100)
+                    source_owner TEXT,
+                    source_name TEXT,
+                    source_type TEXT,
+                    target_owner TEXT,
+                    target_name TEXT,
+                    target_type TEXT,
+                    db_link TEXT
                 )
             """)
             
@@ -2015,10 +2015,10 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    owner VARCHAR(100),
-                    db_link VARCHAR(255),
-                    username VARCHAR(100),
-                    host VARCHAR(255)
+                    owner TEXT,
+                    db_link TEXT,
+                    username TEXT,
+                    host TEXT
                 )
             """)
             
@@ -2027,11 +2027,11 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    grantor VARCHAR(100),
-                    grantee VARCHAR(100),
-                    table_schema VARCHAR(100),
-                    table_name VARCHAR(255),
-                    privilege VARCHAR(50)
+                    grantor TEXT,
+                    grantee TEXT,
+                    table_schema TEXT,
+                    table_name TEXT,
+                    privilege TEXT
                 )
             """)
             
@@ -2040,11 +2040,11 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    synonym_owner VARCHAR(100),
-                    synonym_name VARCHAR(255),
-                    referenced_owner VARCHAR(100),
-                    referenced_object VARCHAR(255),
-                    db_link VARCHAR(100)
+                    synonym_owner TEXT,
+                    synonym_name TEXT,
+                    referenced_owner TEXT,
+                    referenced_object TEXT,
+                    db_link TEXT
                 )
             """)
             
@@ -2054,13 +2054,13 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    source_owner VARCHAR(100),
-                    source_name VARCHAR(255),
-                    source_type VARCHAR(50),
-                    target_owner VARCHAR(100),
-                    target_name VARCHAR(255),
-                    target_type VARCHAR(50),
-                    db_link VARCHAR(100)
+                    source_owner TEXT,
+                    source_name TEXT,
+                    source_type TEXT,
+                    target_owner TEXT,
+                    target_name TEXT,
+                    target_type TEXT,
+                    db_link TEXT
                 )
             """)
             
@@ -2069,10 +2069,10 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    owner VARCHAR(100),
-                    db_link VARCHAR(255),
-                    username VARCHAR(100),
-                    host VARCHAR(255)
+                    owner TEXT,
+                    db_link TEXT,
+                    username TEXT,
+                    host TEXT
                 )
             """)
             
@@ -2081,11 +2081,11 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    grantor VARCHAR(100),
-                    grantee VARCHAR(100),
-                    table_schema VARCHAR(100),
-                    table_name VARCHAR(255),
-                    privilege VARCHAR(50)
+                    grantor TEXT,
+                    grantee TEXT,
+                    table_schema TEXT,
+                    table_name TEXT,
+                    privilege TEXT
                 )
             """)
             
@@ -2094,11 +2094,11 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    synonym_owner VARCHAR(100),
-                    synonym_name VARCHAR(255),
-                    referenced_owner VARCHAR(100),
-                    referenced_object VARCHAR(255),
-                    db_link VARCHAR(100)
+                    synonym_owner TEXT,
+                    synonym_name TEXT,
+                    referenced_owner TEXT,
+                    referenced_object TEXT,
+                    db_link TEXT
                 )
             """)
             
@@ -2108,11 +2108,11 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    schema_name VARCHAR(100),
-                    total_cost NUMERIC(10,2),
-                    migration_level VARCHAR(50),
+                    schema_name TEXT,
+                    total_cost NUMERIC,
+                    migration_level TEXT,
                     analyzed_schemas TEXT,
-                    target_schema VARCHAR(100),
+                    target_schema TEXT,
                     dba_mode BOOLEAN DEFAULT FALSE,
                     reports_count INTEGER DEFAULT 1,
                     metrics JSONB
@@ -2124,16 +2124,16 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    schema_name VARCHAR(100),
+                    schema_name TEXT,
                     object_name TEXT,
-                    object_number INTEGER,
-                    invalid_count INTEGER,
-                    estimated_cost NUMERIC(10,2),
+                    object_number NUMERIC,
+                    invalid_count NUMERIC,
+                    estimated_cost NUMERIC,
                     comments TEXT,
                     details TEXT,
-                    detail_type VARCHAR(20) DEFAULT 'MAIN',
+                    detail_type TEXT DEFAULT 'MAIN',
                     procedure_name TEXT,
-                    procedure_cost NUMERIC(10,2)
+                    procedure_cost NUMERIC
                 )
             """)
             
@@ -2143,12 +2143,12 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    metric_type VARCHAR(50),
-                    object_name VARCHAR(100),
-                    size_gb NUMERIC(12,2),
-                    size_mb NUMERIC(12,2),
-                    size_bytes BIGINT,
-                    file_count INTEGER
+                    metric_type TEXT,
+                    object_name TEXT,
+                    size_gb NUMERIC,
+                    size_mb NUMERIC,
+                    size_bytes NUMERIC,
+                    file_count NUMERIC
                 )
             """)
             
@@ -2158,22 +2158,22 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    tablespace_name VARCHAR(100),
-                    status VARCHAR(20),
-                    type VARCHAR(20),
-                    allocated_gb NUMERIC(12,2),
-                    allocated_mb NUMERIC(12,2),
+                    tablespace_name TEXT,
+                    status TEXT,
+                    type TEXT,
+                    allocated_gb NUMERIC,
+                    allocated_mb NUMERIC,
                     allocated_bytes BIGINT,
-                    used_gb NUMERIC(12,2),
-                    used_mb NUMERIC(12,2),
-                    used_bytes BIGINT,
-                    free_gb NUMERIC(12,2),
-                    free_mb NUMERIC(12,2),
-                    free_bytes BIGINT,
+                    used_gb NUMERIC,
+                    used_mb NUMERIC,
+                    used_bytes NUMERIC,
+                    free_gb NUMERIC,
+                    free_mb NUMERIC,
+                    free_bytes NUMERIC,
                     pct_used NUMERIC(5,2),
                     pct_free NUMERIC(5,2),
-                    datafile_count INTEGER,
-                    segment_count INTEGER
+                    datafile_count NUMERIC,
+                    segment_count NUMERIC
                 )
             """)
             
@@ -2183,11 +2183,11 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    owner VARCHAR(100),
-                    size_gb NUMERIC(12,2),
-                    size_mb NUMERIC(12,2),
+                    owner TEXT,
+                    size_gb NUMERIC,
+                    size_mb NUMERIC,
                     size_bytes NUMERIC,
-                    segment_count INTEGER
+                    segment_count NUMERIC
                 )
             """)
             
@@ -2196,15 +2196,15 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    owner VARCHAR(100),
-                    table_name VARCHAR(255),
-                    segment_type VARCHAR(50),
-                    tablespace_name VARCHAR(100),
+                    owner TEXT,
+                    table_name TEXT,
+                    segment_type TEXT,
+                    tablespace_name TEXT,
                     size_gb NUMERIC(12,4),
-                    size_mb NUMERIC(12,2),
-                    size_bytes BIGINT,
-                    blocks BIGINT,
-                    extents INTEGER
+                    size_mb NUMERIC,
+                    size_bytes NUMERIC,
+                    blocks NUMERIC,
+                    extents NUMERIC
                 )
             """)
             
@@ -2213,15 +2213,15 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    owner VARCHAR(100),
-                    index_name VARCHAR(255),
-                    segment_type VARCHAR(50),
-                    tablespace_name VARCHAR(100),
+                    owner TEXT,
+                    index_name TEXT,
+                    segment_type TEXT,
+                    tablespace_name TEXT,
                     size_gb NUMERIC(12,4),
-                    size_mb NUMERIC(12,2),
-                    size_bytes BIGINT,
-                    blocks BIGINT,
-                    extents INTEGER
+                    size_mb NUMERIC,
+                    size_bytes NUMERIC,
+                    blocks NUMERIC,
+                    extents NUMERIC
                 )
             """)
             
@@ -2230,18 +2230,18 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    owner VARCHAR(100),
-                    segment_name VARCHAR(255),
-                    segment_type VARCHAR(50),
-                    tablespace_name VARCHAR(100),
-                    size_gb NUMERIC(12,4),
-                    size_mb NUMERIC(12,2),
-                    size_bytes BIGINT,
-                    blocks BIGINT,
-                    extents INTEGER,
-                    initial_extent BIGINT,
-                    next_extent BIGINT,
-                    max_extents BIGINT
+                    owner TEXT,
+                    segment_name TEXT,
+                    segment_type TEXT,
+                    tablespace_name TEXT,
+                    size_gb NUMERIC,
+                    size_mb NUMERIC,
+                    size_bytes NUMERIC,
+                    blocks NUMERIC,
+                    extents NUMERIC,
+                    initial_extent NUMERIC,
+                    next_extent NUMERIC,
+                    max_extents NUMERIC
                 )
             """)
             
@@ -2250,12 +2250,12 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    owner VARCHAR(100),
-                    object_name VARCHAR(255),
-                    object_type VARCHAR(50),
-                    char_length INTEGER,
-                    byte_length INTEGER,
-                    line_number INTEGER,
+                    owner TEXT,
+                    object_name TEXT,
+                    object_type TEXT,
+                    char_length NUMERIC,
+                    byte_length NUMERIC,
+                    line_number NUMERIC,
                     line_text TEXT
                 )
             """)
@@ -2265,14 +2265,14 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    owner VARCHAR(100),
-                    object_name VARCHAR(255),
-                    object_type VARCHAR(50),
-                    total_lines INTEGER,
-                    total_chars BIGINT,
-                    total_bytes BIGINT,
-                    first_line INTEGER,
-                    last_line INTEGER
+                    owner TEXT,
+                    object_name TEXT,
+                    object_type TEXT,
+                    total_lines NUMERIC,
+                    total_chars NUMERIC,
+                    total_bytes NUMERIC,
+                    first_line NUMERIC,
+                    last_line NUMERIC
                 )
             """)
             
@@ -2282,12 +2282,12 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    metric_type VARCHAR(50),
-                    object_name VARCHAR(100),
-                    size_gb NUMERIC(12,2),
-                    size_mb NUMERIC(12,2),
-                    size_bytes BIGINT,
-                    file_count INTEGER
+                    metric_type TEXT,
+                    object_name TEXT,
+                    size_gb NUMERIC,
+                    size_mb NUMERIC,
+                    size_bytes NUMERIC,
+                    file_count NUMERIC
                 )
             """)
             
@@ -2297,12 +2297,12 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    tablespace_name VARCHAR(100),
-                    used_gb NUMERIC(12,2),
-                    used_mb NUMERIC(12,2),
-                    used_bytes BIGINT,
-                    file_count INTEGER,
-                    status VARCHAR(20)
+                    tablespace_name TEXT,
+                    used_gb NUMERIC,
+                    used_mb NUMERIC,
+                    used_bytes NUMERIC,
+                    file_count NUMERIC,
+                    status TEXT
                 )
             """)
             
@@ -2312,11 +2312,11 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    owner VARCHAR(100),
-                    size_gb NUMERIC(12,2),
-                    size_mb NUMERIC(12,2),
-                    size_bytes BIGINT,
-                    segment_count INTEGER
+                    owner TEXT,
+                    size_gb NUMERIC,
+                    size_mb NUMERIC,
+                    size_bytes NUMERIC,
+                    segment_count NUMERIC
                 )
             """)
             
@@ -2325,15 +2325,15 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    owner VARCHAR(100),
-                    table_name VARCHAR(255),
-                    segment_type VARCHAR(50),
-                    tablespace_name VARCHAR(100),
-                    size_gb NUMERIC(12,4),
-                    size_mb NUMERIC(12,2),
-                    size_bytes BIGINT,
-                    blocks BIGINT,
-                    extents INTEGER
+                    owner TEXT,
+                    table_name TEXT,
+                    segment_type TEXT,
+                    tablespace_name TEXT,
+                    size_gb NUMERIC,
+                    size_mb NUMERIC,
+                    size_bytes NUMERIC,
+                    blocks NUMERIC,
+                    extents NUMERIC
                 )
             """)
             
@@ -2342,15 +2342,15 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    owner VARCHAR(100),
-                    index_name VARCHAR(255),
-                    segment_type VARCHAR(50),
-                    tablespace_name VARCHAR(100),
-                    size_gb NUMERIC(12,4),
-                    size_mb NUMERIC(12,2),
-                    size_bytes BIGINT,
-                    blocks BIGINT,
-                    extents INTEGER
+                    owner TEXT,
+                    index_name TEXT,
+                    segment_type TEXT,
+                    tablespace_name TEXT,
+                    size_gb NUMERIC,
+                    size_mb NUMERIC,
+                    size_bytes NUMERIC,
+                    blocks NUMERIC,
+                    extents NUMERIC
                 )
             """)
             
@@ -2359,18 +2359,18 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    owner VARCHAR(100),
-                    segment_name VARCHAR(255),
-                    segment_type VARCHAR(50),
-                    tablespace_name VARCHAR(100),
-                    size_gb NUMERIC(12,4),
-                    size_mb NUMERIC(12,2),
-                    size_bytes BIGINT,
-                    blocks BIGINT,
-                    extents INTEGER,
-                    initial_extent BIGINT,
-                    next_extent BIGINT,
-                    max_extents BIGINT
+                    owner TEXT,
+                    segment_name TEXT,
+                    segment_type TEXT,
+                    tablespace_name TEXT,
+                    size_gb NUMERIC,
+                    size_mb NUMERIC,
+                    size_bytes NUMERIC,
+                    blocks NUMERIC,
+                    extents NUMERIC,
+                    initial_extent NUMERIC,
+                    next_extent NUMERIC,
+                    max_extents NUMERIC
                 )
             """)
             
@@ -2379,12 +2379,12 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    owner VARCHAR(100),
-                    object_name VARCHAR(255),
-                    object_type VARCHAR(50),
-                    char_length INTEGER,
-                    byte_length INTEGER,
-                    line_number INTEGER,
+                    owner TEXT,
+                    object_name TEXT,
+                    object_type TEXT,
+                    char_length NUMERIC,
+                    byte_length NUMERIC,
+                    line_number NUMERIC,
                     line_text TEXT
                 )
             """)
@@ -2394,14 +2394,14 @@ DEBUG           0
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    owner VARCHAR(100),
-                    object_name VARCHAR(255),
-                    object_type VARCHAR(50),
-                    total_lines INTEGER,
-                    total_chars BIGINT,
-                    total_bytes BIGINT,
-                    first_line INTEGER,
-                    last_line INTEGER
+                    owner TEXT,
+                    object_name TEXT,
+                    object_type TEXT,
+                    total_lines NUMERIC,
+                    total_chars NUMERIC,
+                    total_bytes NUMERIC,
+                    first_line NUMERIC,
+                    last_line NUMERIC
                 )
             """)
             
