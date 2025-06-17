@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
 Script per analisi dipendenze Oracle e stima migrazione PostgreSQL
-Versione con prefissi tabelle pdt_dep_, pdt_sizes_dba_/pdt_sizes_nodba_, rilevamento privilegi DBA,
+Versione con prefissi tabelle pdt_dep_dba_/pdt_dep_nodba_, pdt_sizes_dba_/pdt_sizes_nodba_, rilevamento privilegi DBA,
 configurazioni esterne multiple, gestione connessioni normalizzata, output Excel e analisi dimensioni
+ORA2PG: Utilizza schema specificato nel config JSON, altrimenti logica DBA/NON-DBA
+Query tablespace aggiornate: DBA (dettagli completi), NON-DBA (aggregato per tablespace)
+MODIFICHE: File Excel specifici disattivati, naming con schema invece di username
 """
 
 import oracledb
@@ -59,15 +62,9 @@ class OracleMultiDatabaseAnalyzer:
         self.ora2pg_output_mode = self.config.get('ora2pg_output_mode', 'html_and_txt')
         
         # Log delle connessioni caricate
-        print(f"✅ Configurazione caricata da: {config_file}")
-        print(f"🐘 PostgreSQL target: {self.pg_config['host']}:{self.pg_config['port']}/{self.pg_config['database']}")
-        print(f"🔗 Connessioni Oracle trovate: {len(self.oracle_connections)}")
-        print(f"📊 Formato output: {'Excel' if self.generate_excel else 'CSV' if self.generate_csv else 'Solo Database'}")
-        print(f"📋 Output ora2pg: {self.ora2pg_output_mode}")
-        print(f"📏 Analisi dimensioni: {'Abilitata' if self.analyze_sizes else 'Disabilitata'}")
-        print(f"🗄️  Prefissi tabelle: pdt_dep_ (dipendenze), pdt_sizes_dba_/pdt_sizes_nodba_ (dimensioni), ptd_ (ora2pg)")
         for conn in self.oracle_connections:
-            print(f"  - {conn['connection_name']}: {conn['user']}@{conn['dsn']}")
+            schema_info = f" -> schema: {conn['schema']}" if 'schema' in conn else " -> schema: auto (DBA/NON-DBA)"
+            print(f"  - {conn['connection_name']}: {conn['user']}@{conn.get('dsn', 'N/A')}{schema_info}")
     
     def setup_oracle_client(self):
         """Configura Oracle Client con path automatico o configurabile"""
@@ -144,11 +141,15 @@ class OracleMultiDatabaseAnalyzer:
                 raise ValueError("Nessuna connessione Oracle definita")
             
             # Validazione campi obbligatori per ogni connessione
-            required_fields = ['connection_name', 'dsn', 'user', 'password']
+            required_fields = ['connection_name', 'user', 'password']
             for i, conn in enumerate(config['oracle_connections']):
                 for field in required_fields:
                     if field not in conn:
                         raise ValueError(f"Campo '{field}' mancante nella connessione {i+1}")
+                
+                # DSN non è obbligatorio se non specificato
+                if 'dsn' not in conn:
+                    print(f"⚠️  Connessione {conn['connection_name']}: DSN mancante, verrà saltata")
             
             print("✅ Configurazione validata con successo")
             return config
@@ -181,16 +182,20 @@ class OracleMultiDatabaseAnalyzer:
                     "dsn": "10.138.154.6:10461/GRMED",
                     "user": "GRMED",
                     "password": "your_oracle_password",
+                    "schema": "GRMED",
                     "description": "Database GRMED produzione",
-                    "is_dba": False
+                    "is_dba": "auto",
+                    "analyze_all_schemas": True
                 },
                 {
                     "connection_name": "EXAMPLE_DB",
                     "dsn": "hostname:port/service_name",
                     "user": "username",
                     "password": "password",
+                    "schema": "TARGET_SCHEMA",
                     "description": "Descrizione database di esempio",
-                    "is_dba": "auto"
+                    "is_dba": False,
+                    "analyze_all_schemas": False
                 }
             ],
             "oracle_client_path": "C:/instantclient_23_7/instantclient_23_7",
@@ -204,6 +209,8 @@ class OracleMultiDatabaseAnalyzer:
         print(f"📄 File di esempio creato: {self.config_file}")
         print("✏️  Modifica il file con le tue configurazioni e riesegui lo script.")
         print("💡 Opzioni 'is_dba': true, false, 'auto' (rileva automaticamente)")
+        print("💡 Opzioni 'analyze_all_schemas': true (tutti gli schemi), false (solo utente corrente)")
+        print("💡 Campo 'schema': opzionale, specifica lo schema per ora2pg (indipendente da DBA/NON-DBA)")
         
     def get_db_connection(self, dsn, user, password):
         """Connessione al database Oracle usando oracledb"""
@@ -277,11 +284,136 @@ class OracleMultiDatabaseAnalyzer:
         cursor.close()
         return is_dba
     
-    def get_oracle_dependencies(self, connection):
-        """Estrae dipendenze tra oggetti Oracle"""
+    def get_oracle_dependencies_dba(self, connection, db_config):
+        """🆕 Estrae dipendenze per utenti DBA (tutti gli schemi del database)"""
         cursor = connection.cursor()
         
-        # Query per dipendenze tra schemi
+        # Ottieni l'utente corrente
+        cursor.execute("SELECT USER FROM DUAL")
+        current_user = cursor.fetchone()[0]
+        print(f"    📊 Analisi dipendenze DBA per utente: {current_user}")
+        
+        # Verifica se analizzare tutti gli schemi
+        analyze_all = db_config.get('analyze_all_schemas', True)
+        schema_filter = ""
+        params = {}
+        
+        if not analyze_all:
+            # Solo schema dell'utente corrente
+            schema_filter = "AND (d.owner = :current_user OR d.referenced_owner = :current_user)"
+            params['current_user'] = current_user
+            print(f"    🎯 Modalità: Solo schema {current_user}")
+        else:
+            print(f"    🎯 Modalità: Tutti gli schemi del database")
+        
+        # Query per dipendenze tra schemi (DBA - accesso completo)
+        dependencies_query = f"""
+        SELECT 
+            d.owner AS source_owner,
+            d.name AS source_name,
+            d.type AS source_type,
+            d.referenced_owner AS target_owner,
+            d.referenced_name AS target_name,
+            d.referenced_type AS target_type,
+            d.referenced_link_name AS db_link
+        FROM 
+            dba_dependencies d
+        WHERE 
+            d.owner <> d.referenced_owner
+            AND d.referenced_owner NOT IN ('SYS', 'SYSTEM', 'PUBLIC', 'OUTLN', 'DBSNMP')
+            AND d.owner NOT IN ('SYS', 'SYSTEM', 'PUBLIC', 'OUTLN', 'DBSNMP')
+            {schema_filter}
+        ORDER BY 
+            d.owner, d.name
+        """
+        
+        # Query per DB Links accessibili (DBA - tutti i DB links)
+        dblinks_query = f"""
+        SELECT 
+            owner,
+            db_link,
+            username,
+            host
+        FROM 
+            dba_db_links
+        WHERE 
+            owner NOT IN ('SYS', 'SYSTEM', 'PUBLIC')
+            {("AND owner = :current_user" if not analyze_all else "")}
+        ORDER BY owner, db_link
+        """
+        
+        # Query per oggetti degli schemi (DBA)
+        objects_query = f"""
+        SELECT 
+            owner,
+            object_type,
+            COUNT(*) as object_count
+        FROM 
+            dba_objects
+        WHERE 
+            object_type NOT LIKE '%PARTITION%'
+            AND owner NOT IN ('SYS', 'SYSTEM', 'PUBLIC', 'OUTLN', 'DBSNMP')
+            {("AND owner = :current_user" if not analyze_all else "")}
+        GROUP BY 
+            owner, object_type
+        ORDER BY 
+            owner, object_type
+        """
+        
+        # 🔧 QUERY CORRETTA: Usa 'owner' invece di 'table_schema' per dba_tab_privs
+        cross_schema_query = f"""
+        SELECT DISTINCT
+            p.grantor AS privilege_grantor,
+            p.grantee AS privilege_grantee,
+            p.owner AS table_schema,
+            p.table_name,
+            p.privilege
+        FROM 
+            dba_tab_privs p
+        WHERE 
+            p.grantee NOT IN ('PUBLIC', 'SYS', 'SYSTEM', 'OUTLN', 'DBSNMP')
+            AND p.grantor NOT IN ('SYS', 'SYSTEM', 'PUBLIC', 'OUTLN', 'DBSNMP')
+            AND p.grantor <> p.grantee
+            {("AND (p.grantor = :current_user OR p.grantee = :current_user)" if not analyze_all else "")}
+        ORDER BY p.grantee, p.owner, p.table_name, p.privilege
+        """
+        
+        # Query per oggetti referenziati da altri schemi (DBA)
+        external_refs_query = f"""
+        SELECT DISTINCT
+            s.owner AS synonym_owner,
+            s.synonym_name,
+            s.table_owner AS referenced_owner,
+            s.table_name AS referenced_object,
+            s.db_link
+        FROM 
+            dba_synonyms s
+        WHERE 
+            s.owner != s.table_owner
+            AND s.owner NOT IN ('PUBLIC', 'SYS', 'SYSTEM', 'OUTLN', 'DBSNMP')
+            AND s.table_owner NOT IN ('SYS', 'SYSTEM', 'PUBLIC', 'OUTLN', 'DBSNMP')
+            {("AND s.table_owner = :current_user" if not analyze_all else "")}
+        ORDER BY s.owner, s.synonym_name, s.table_owner, s.table_name, s.db_link
+        """
+        
+        return self._execute_dependency_queries(cursor, {
+            'dependencies': dependencies_query,
+            'db_links': dblinks_query,
+            'object_summary': objects_query,
+            'cross_schema_privs': cross_schema_query,
+            'external_references': external_refs_query
+        }, params, is_dba=True)
+    
+    def get_oracle_dependencies_non_dba(self, connection):
+        """🆕 Estrae dipendenze per utenti NON DBA (solo schema corrente)"""
+        cursor = connection.cursor()
+        
+        # Ottieni l'utente corrente
+        cursor.execute("SELECT USER FROM DUAL")
+        current_user = cursor.fetchone()[0]
+        print(f"    📊 Analisi dipendenze NON-DBA per utente: {current_user}")
+        
+        # Query per dipendenze tra schemi (NON DBA - solo ALL_DEPENDENCIES)
         dependencies_query = """
         SELECT 
             d.owner AS source_owner,
@@ -294,14 +426,14 @@ class OracleMultiDatabaseAnalyzer:
         FROM 
             all_dependencies d
         WHERE 
-           ( d.owner = :current_user
-            OR d.referenced_owner = :current_user)AND ( d.owner <> d.referenced_owner)
-            AND d.referenced_owner NOT IN  ('SYS', 'SYSTEM', 'PUBLIC')
+            (d.owner = :current_user OR d.referenced_owner = :current_user)
+            AND d.owner <> d.referenced_owner
+            AND d.referenced_owner NOT IN ('SYS', 'SYSTEM', 'PUBLIC')
         ORDER BY 
             d.owner, d.name
         """
         
-        # Query per DB Links accessibili all'utente
+        # Query per DB Links accessibili all'utente (NON DBA)
         dblinks_query = """
         SELECT 
             owner,
@@ -315,7 +447,7 @@ class OracleMultiDatabaseAnalyzer:
             OR owner = 'PUBLIC'
         """
         
-        # Query per oggetti dello schema corrente
+        # Query per oggetti dello schema corrente (NON DBA)
         objects_query = """
         SELECT 
             owner,
@@ -332,12 +464,12 @@ class OracleMultiDatabaseAnalyzer:
             owner, object_type
         """
         
-        # Query per privilegi cross-schema
+        # 🔧 QUERY CORRETTA: Usa 'owner' invece di 'table_schema' per all_tab_privs
         cross_schema_query = """
         SELECT DISTINCT
             p.grantor AS privilege_grantor,
             p.grantee AS privilege_grantee,
-            p.table_schema,
+            p.owner AS table_schema,
             p.table_name,
             p.privilege
         FROM 
@@ -345,12 +477,10 @@ class OracleMultiDatabaseAnalyzer:
         WHERE 
             (p.grantor = :current_user OR p.grantee = :current_user)
             AND p.grantee NOT IN ('PUBLIC', 'SYS', 'SYSTEM')
-        ORDER BY p.grantee,p.table_schema,
-            p.table_name,
-            p.privilege
+        ORDER BY p.grantee, p.owner, p.table_name, p.privilege
         """
         
-        # Query per oggetti referenziati da altri schemi
+        # Query per oggetti referenziati da altri schemi (NON DBA)
         external_refs_query = """
         SELECT DISTINCT
             s.owner AS synonym_owner,
@@ -364,70 +494,62 @@ class OracleMultiDatabaseAnalyzer:
             s.table_owner = :current_user
             AND s.owner != :current_user
             AND s.owner NOT IN ('PUBLIC', 'SYS', 'SYSTEM')
-        ORDER BY s.owner,
-            s.synonym_name,
-            s.table_owner,
-            s.table_name,
-            s.db_link
+        ORDER BY s.owner, s.synonym_name, s.table_owner, s.table_name, s.db_link
         """
         
+        return self._execute_dependency_queries(cursor, {
+            'dependencies': dependencies_query,
+            'db_links': dblinks_query,
+            'object_summary': objects_query,
+            'cross_schema_privs': cross_schema_query,
+            'external_references': external_refs_query
+        }, {'current_user': current_user}, is_dba=False)
+    
+    def _execute_dependency_queries(self, cursor, queries, params, is_dba):
+        """🆕 Esegue le query delle dipendenze e gestisce i risultati"""
         results = {
             'dependencies': [],
             'db_links': [],
             'object_summary': [],
             'cross_schema_privs': [],
-            'external_references': []
+            'external_references': [],
+            'is_dba': is_dba
         }
         
-        # Ottieni l'utente corrente
-        cursor.execute("SELECT USER FROM DUAL")
-        current_user = cursor.fetchone()[0]
-        print(f"    📊 Analisi dipendenze per utente: {current_user}")
+        query_descriptions = {
+            'dependencies': 'Dipendenze',
+            'db_links': 'DB Links',
+            'object_summary': 'Oggetti',
+            'cross_schema_privs': 'Privilegi cross-schema',
+            'external_references': 'Riferimenti esterni'
+        }
         
-        try:
-            # Esegui query dipendenze
-            cursor.execute(dependencies_query, current_user=current_user)
-            results['dependencies'] = cursor.fetchall()
-            print(f"    - Dipendenze trovate: {len(results['dependencies'])}")
-        except Exception as e:
-            print(f"    ⚠️  Errore query dipendenze: {str(e)}")
-        
-        try:
-            # Esegui query DB Links
-            cursor.execute(dblinks_query, current_user=current_user)
-            results['db_links'] = cursor.fetchall()
-            print(f"    - DB Links trovati: {len(results['db_links'])}")
-        except Exception as e:
-            print(f"    ⚠️  Errore query DB Links: {str(e)}")
-        
-        try:
-            # Esegui query oggetti
-            cursor.execute(objects_query, current_user=current_user)
-            results['object_summary'] = cursor.fetchall()
-            print(f"    - Tipi oggetti: {len(results['object_summary'])}")
-        except Exception as e:
-            print(f"    ⚠️  Errore query oggetti: {str(e)}")
-        
-        try:
-            # Esegui query privilegi cross-schema
-            cursor.execute(cross_schema_query, current_user=current_user)
-            results['cross_schema_privs'] = cursor.fetchall()
-            print(f"    - Privilegi cross-schema: {len(results['cross_schema_privs'])}")
-        except Exception as e:
-            print(f"    ⚠️  Errore query privilegi: {str(e)}")
-        
-        try:
-            # Esegui query riferimenti esterni
-            cursor.execute(external_refs_query, current_user=current_user)
-            results['external_references'] = cursor.fetchall()
-            print(f"    - Riferimenti esterni: {len(results['external_references'])}")
-        except Exception as e:
-            print(f"    ⚠️  Errore query riferimenti esterni: {str(e)}")
+        for query_type, query_sql in queries.items():
+            try:
+                if params:
+                    cursor.execute(query_sql, **params)
+                else:
+                    cursor.execute(query_sql)
+                
+                results[query_type] = cursor.fetchall()
+                count = len(results[query_type])
+                print(f"    - {query_descriptions[query_type]}: {count} record")
+                
+            except Exception as e:
+                print(f"    ⚠️  Errore query {query_descriptions[query_type]}: {str(e)}")
+                results[query_type] = []
         
         cursor.close()
         return results
     
-    def get_oracle_sizes_dba(self, connection):
+    def get_oracle_dependencies(self, connection, is_dba, db_config):
+        """🆕 Dispatcher per query dipendenze in base ai privilegi"""
+        if is_dba:
+            return self.get_oracle_dependencies_dba(connection, db_config)
+        else:
+            return self.get_oracle_dependencies_non_dba(connection)
+    
+    def get_oracle_sizes_dba(self, connection, db_config):
         """🆕 Estrae informazioni dimensioni per utenti DBA"""
         cursor = connection.cursor()
         
@@ -435,6 +557,19 @@ class OracleMultiDatabaseAnalyzer:
         cursor.execute("SELECT USER FROM DUAL")
         current_user = cursor.fetchone()[0]
         print(f"    📏 Analisi dimensioni DBA per utente: {current_user}")
+        
+        # Verifica se analizzare tutti gli schemi
+        analyze_all = db_config.get('analyze_all_schemas', True)
+        schema_filter = ""
+        params = {}
+        
+        if not analyze_all:
+            schema_filter = "WHERE owner = :current_user"
+            params['current_user'] = current_user
+            print(f"    🎯 Dimensioni modalità: Solo schema {current_user}")
+        else:
+            schema_filter = "WHERE owner NOT IN ('SYS', 'SYSTEM', 'PUBLIC', 'OUTLN', 'DBSNMP')"
+            print(f"    🎯 Dimensioni modalità: Tutti gli schemi del database")
         
         # Query per dimensioni database (DBA)
         database_size_query = """
@@ -459,25 +594,70 @@ class OracleMultiDatabaseAnalyzer:
             dba_temp_files
         """
         
-        # Query per dimensioni tablespace (DBA)
+        # 🆕 Query per dimensioni tablespace (DBA) - NUOVA QUERY DETTAGLIATA
         tablespace_size_query = """
-        SELECT 
-            tablespace_name,
-            ROUND(SUM(bytes)/1024/1024/1024, 2) as size_gb,
-            ROUND(SUM(bytes)/1024/1024, 2) as size_mb,
-            SUM(bytes) as size_bytes,
-            COUNT(*) as file_count,
-            status
-        FROM 
-            dba_data_files
-        GROUP BY 
-            tablespace_name, status
-        ORDER BY 
-            SUM(bytes) DESC
+        SELECT
+            ts.tablespace_name,
+            ts.status,
+            ts.contents as type,
+            -- Spazio allocato (dimensione fisica dei file)
+            ROUND(NVL(df.allocated_gb, 0), 2) as allocated_gb,
+            ROUND(NVL(df.allocated_mb, 0), 2) as allocated_mb,
+            df.allocated_bytes,
+            -- Spazio utilizzato (dai segmenti)
+            ROUND(NVL(seg.used_gb, 0), 2) as used_gb,
+            ROUND(NVL(seg.used_mb, 0), 2) as used_mb,
+            seg.used_bytes,
+            -- Spazio libero
+            ROUND(NVL(fs.free_gb, 0), 2) as free_gb,
+            ROUND(NVL(fs.free_mb, 0), 2) as free_mb,
+            fs.free_bytes,
+            -- Percentuali
+            ROUND(CASE WHEN df.allocated_gb > 0 THEN (seg.used_gb / df.allocated_gb) * 100 ELSE 0 END, 2) as pct_used,
+            ROUND(CASE WHEN df.allocated_gb > 0 THEN (fs.free_gb / df.allocated_gb) * 100 ELSE 0 END, 2) as pct_free,
+            -- Numero di file e segmenti
+            NVL(df.file_count, 0) as datafile_count,
+            NVL(seg.segment_count, 0) as segment_count
+        FROM
+            dba_tablespaces ts
+        LEFT JOIN
+            -- Spazio allocato dai datafile
+            (SELECT
+                tablespace_name,
+                ROUND(SUM(bytes)/1024/1024/1024, 2) as allocated_gb,
+                ROUND(SUM(bytes)/1024/1024, 2) as allocated_mb,
+                SUM(bytes) as allocated_bytes,
+                COUNT(*) as file_count
+             FROM dba_data_files
+             GROUP BY tablespace_name) df
+        ON ts.tablespace_name = df.tablespace_name
+        LEFT JOIN
+            -- Spazio libero
+            (SELECT
+                tablespace_name,
+                ROUND(SUM(bytes)/1024/1024/1024, 2) as free_gb,
+                ROUND(SUM(bytes)/1024/1024, 2) as free_mb,
+                SUM(bytes) AS free_bytes
+             FROM dba_free_space
+             GROUP BY tablespace_name) fs
+        ON ts.tablespace_name = fs.tablespace_name
+        LEFT JOIN
+            -- Spazio utilizzato dai segmenti
+            (SELECT
+                tablespace_name,
+                ROUND(SUM(bytes)/1024/1024/1024, 2) as used_gb,
+                ROUND(SUM(bytes)/1024/1024, 2) as used_mb,
+                SUM(bytes) AS used_bytes,
+                COUNT(*) as segment_count
+             FROM dba_segments
+             GROUP BY tablespace_name) seg
+        ON ts.tablespace_name = seg.tablespace_name
+        WHERE ts.contents != 'TEMPORARY'  -- Escludi tablespace temporanei
+        ORDER BY df.tablespace_name NULLS LAST
         """
         
         # Query per dimensioni schema (DBA)
-        schema_size_query = """
+        schema_size_query = f"""
         SELECT 
             owner,
             ROUND(SUM(bytes)/1024/1024/1024, 2) as size_gb,
@@ -486,14 +666,14 @@ class OracleMultiDatabaseAnalyzer:
             COUNT(*) as segment_count
         FROM 
             dba_segments
-        WHERE 
-            owner = :current_user
+        {schema_filter}
         GROUP BY 
             owner
+        ORDER BY owner
         """
         
         # Query per dimensioni tabelle (DBA)
-        table_size_query = """
+        table_size_query = f"""
         SELECT 
             owner,
             segment_name as table_name,
@@ -507,14 +687,14 @@ class OracleMultiDatabaseAnalyzer:
         FROM 
             dba_segments
         WHERE 
-            owner = :current_user
-            AND segment_type IN ('TABLE', 'TABLE PARTITION', 'TABLE SUBPARTITION')
+            segment_type IN ('TABLE', 'TABLE PARTITION', 'TABLE SUBPARTITION')
+            {("AND owner = :current_user" if not analyze_all else "AND owner NOT IN ('SYS', 'SYSTEM', 'PUBLIC', 'OUTLN', 'DBSNMP')")}
         ORDER BY 
-            bytes DESC
+            owner, segment_name
         """
         
         # Query per dimensioni indici (DBA)
-        index_size_query = """
+        index_size_query = f"""
         SELECT 
             owner,
             segment_name as index_name,
@@ -528,14 +708,14 @@ class OracleMultiDatabaseAnalyzer:
         FROM 
             dba_segments
         WHERE 
-            owner = :current_user
-            AND segment_type LIKE '%INDEX%'
+            segment_type LIKE '%INDEX%'
+            {("AND owner = :current_user" if not analyze_all else "AND owner NOT IN ('SYS', 'SYSTEM', 'PUBLIC', 'OUTLN', 'DBSNMP')")}
         ORDER BY 
-            bytes DESC
+            owner, segment_name
         """
         
         # Query per dimensioni segmenti (DBA)
-        segment_size_query = """
+        segment_size_query = f"""
         SELECT 
             owner,
             segment_name,
@@ -551,14 +731,13 @@ class OracleMultiDatabaseAnalyzer:
             max_extents
         FROM 
             dba_segments
-        WHERE 
-            owner = :current_user
+        {("WHERE owner = :current_user" if not analyze_all else "WHERE owner NOT IN ('SYS', 'SYSTEM', 'PUBLIC', 'OUTLN', 'DBSNMP')")}
         ORDER BY 
-            bytes DESC
+            owner, segment_name
         """
         
-        # Query per dimensioni codice (sempre ALL_SOURCE)
-        code_size_query = """
+        # Query per dimensioni codice (DBA - ma sempre limitato agli schemi accessibili)
+        code_size_query = f"""
         SELECT 
             owner,
             name as object_name,
@@ -570,14 +749,14 @@ class OracleMultiDatabaseAnalyzer:
         FROM 
             all_source
         WHERE 
-            owner = :current_user
-            AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION', 'TRIGGER')
+            type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION', 'TRIGGER')
+            {("AND owner = :current_user" if not analyze_all else "AND owner NOT IN ('SYS', 'SYSTEM', 'PUBLIC', 'OUTLN', 'DBSNMP')")}
         ORDER BY 
             owner, name, type, line
         """
         
-        # Query aggregata per statistiche codice
-        code_stats_query = """
+        # Query aggregata per statistiche codice (DBA)
+        code_stats_query = f"""
         SELECT 
             owner,
             name as object_name,
@@ -590,15 +769,15 @@ class OracleMultiDatabaseAnalyzer:
         FROM 
             all_source
         WHERE 
-            owner = :current_user
-            AND type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION', 'TRIGGER')
+            type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION', 'TRIGGER')
+            {("AND owner = :current_user" if not analyze_all else "AND owner NOT IN ('SYS', 'SYSTEM', 'PUBLIC', 'OUTLN', 'DBSNMP')")}
         GROUP BY 
             owner, name, type
         ORDER BY 
-            SUM(LENGTHB(text)) DESC
+            owner, name, type
         """
         
-        return self._execute_size_queries(cursor, current_user, {
+        return self._execute_size_queries(cursor, {
             'database_size': database_size_query,
             'tablespace_size': tablespace_size_query,
             'schema_size': schema_size_query,
@@ -607,7 +786,7 @@ class OracleMultiDatabaseAnalyzer:
             'segment_size': segment_size_query,
             'code_lines': code_size_query,
             'code_stats': code_stats_query
-        }, is_dba=True)
+        }, params, is_dba=True)
     
     def get_oracle_sizes_non_dba(self, connection):
         """🆕 Estrae informazioni dimensioni per utenti NON DBA"""
@@ -631,21 +810,21 @@ class OracleMultiDatabaseAnalyzer:
             user_segments
         """
         
-        # Query per dimensioni tablespace (NON DBA) - solo tablespace dell'utente
+        # 🆕 Query per dimensioni tablespace (NON DBA) - NUOVA QUERY AGGREGATA
         tablespace_size_query = """
         SELECT DISTINCT
             tablespace_name,
-            ROUND(SUM(bytes) / 1024 / 1024 / 1024, 2) as size_gb,
-            ROUND(SUM(bytes) / 1024 / 1024, 2) as size_mb,
-            ROUND(SUM(bytes) / 1024 , 2) as size_bytes,
-            NULL as file_count,
+            ROUND(SUM(bytes) / 1024 / 1024 / 1024, 2) as used_gb,
+            ROUND(SUM(bytes) / 1024 / 1024, 2) as used_mb,
+            SUM(bytes) as used_bytes,
+            COUNT(*) as file_count,
             'UNKNOWN' as status
-        FROM 
+        FROM
             user_segments
         GROUP BY
             tablespace_name
-        ORDER BY 
-            tablespace_name
+        ORDER BY
+            tablespace_name NULLS LAST
         """
         
         # Query per dimensioni schema (NON DBA)
@@ -679,7 +858,7 @@ class OracleMultiDatabaseAnalyzer:
         WHERE 
             segment_type IN ('TABLE', 'TABLE PARTITION', 'TABLE SUBPARTITION')
         ORDER BY 
-            bytes DESC
+            owner, segment_name, segment_type
         """
         
         # Query per dimensioni indici (NON DBA)
@@ -699,7 +878,7 @@ class OracleMultiDatabaseAnalyzer:
         WHERE 
             segment_type LIKE '%INDEX%'
         ORDER BY 
-            bytes DESC
+            owner, segment_name, segment_type
         """
         
         # Query per dimensioni segmenti (NON DBA)
@@ -720,7 +899,7 @@ class OracleMultiDatabaseAnalyzer:
         FROM 
             user_segments
         ORDER BY 
-            bytes DESC
+            owner, segment_name, segment_type
         """
         
         # Query per dimensioni codice (NON DBA) - solo USER_SOURCE
@@ -738,7 +917,7 @@ class OracleMultiDatabaseAnalyzer:
         WHERE 
             type IN ('PACKAGE', 'PACKAGE BODY', 'PROCEDURE', 'FUNCTION', 'TRIGGER')
         ORDER BY 
-            name, type, line
+            user, name, type, line
         """
         
         # Query aggregata per statistiche codice (NON DBA)
@@ -759,10 +938,10 @@ class OracleMultiDatabaseAnalyzer:
         GROUP BY 
             name, type
         ORDER BY 
-            SUM(LENGTHB(text)) DESC
+            user, name, type
         """
         
-        return self._execute_size_queries(cursor, current_user, {
+        return self._execute_size_queries(cursor, {
             'database_size': database_size_query,
             'tablespace_size': tablespace_size_query,
             'schema_size': schema_size_query,
@@ -771,9 +950,9 @@ class OracleMultiDatabaseAnalyzer:
             'segment_size': segment_size_query,
             'code_lines': code_size_query,
             'code_stats': code_stats_query
-        }, is_dba=False)
+        }, {}, is_dba=False)
     
-    def _execute_size_queries(self, cursor, current_user, queries, is_dba):
+    def _execute_size_queries(self, cursor, queries, params, is_dba):
         """🆕 Esegue le query delle dimensioni e gestisce i risultati"""
         results = {
             'database_size': [],
@@ -800,20 +979,14 @@ class OracleMultiDatabaseAnalyzer:
         
         for query_type, query_sql in queries.items():
             try:
-                if query_type in ['code_lines', 'code_stats']:
-                    # Codice non richiede parametri per USER_SOURCE
-                    if is_dba:
-                        cursor.execute(query_sql, current_user=current_user)
-                    else:
-                        cursor.execute(query_sql)
-                elif query_type in ['schema_size', 'table_size', 'index_size', 'segment_size']:
-                    # Query che richiedono current_user per DBA
-                    if is_dba:
-                        cursor.execute(query_sql, current_user=current_user)
-                    else:
-                        cursor.execute(query_sql)
+                if query_type in ['database_size', 'tablespace_size'] and not is_dba:
+                    # Query semplici per NON-DBA senza parametri
+                    cursor.execute(query_sql)
+                elif params and query_type in ['schema_size', 'table_size', 'index_size', 'segment_size', 'code_lines', 'code_stats']:
+                    # Query che potrebbero aver bisogno di parametri per DBA
+                    cursor.execute(query_sql, **params)
                 else:
-                    # Database e tablespace size
+                    # Query senza parametri
                     cursor.execute(query_sql)
                 
                 results[query_type] = cursor.fetchall()
@@ -827,12 +1000,62 @@ class OracleMultiDatabaseAnalyzer:
         cursor.close()
         return results
     
-    def get_oracle_sizes(self, connection, is_dba):
+    def get_oracle_sizes(self, connection, is_dba, db_config):
         """🆕 Dispatcher per query dimensioni in base ai privilegi"""
         if is_dba:
-            return self.get_oracle_sizes_dba(connection)
+            return self.get_oracle_sizes_dba(connection, db_config)
         else:
             return self.get_oracle_sizes_non_dba(connection)
+    
+    def get_all_schemas_for_dba(self, connection, db_config):
+        """🆕 Ottiene lista di tutti gli schemi per utenti DBA (per ora2pg)"""
+        cursor = connection.cursor()
+        
+        # Verifica se analizzare tutti gli schemi
+        analyze_all = db_config.get('analyze_all_schemas', True)
+        
+        if not analyze_all:
+            # Solo schema dell'utente corrente
+            cursor.execute("SELECT USER FROM DUAL")
+            current_user = cursor.fetchone()[0]
+            cursor.close()
+            return [current_user]
+        
+        try:
+            # Per DBA: ottieni tutti gli schemi non di sistema con oggetti significativi
+            cursor.execute("""
+                SELECT DISTINCT owner
+                FROM dba_objects
+                WHERE owner NOT IN ('SYS', 'SYSTEM', 'PUBLIC', 'OUTLN', 'DBSNMP', 'ANONYMOUS', 'CTXSYS', 'DBSNMP', 'EXFSYS', 'LBACSYS', 'MDSYS', 'MGMT_VIEW', 'OLAPSYS', 'ORDDATA', 'OWBSYS', 'ORDPLUGINS', 'ORDSYS', 'PERFSTAT', 'WKPROXY', 'WKSYS', 'WK_TEST', 'WWWSCHEMAS', 'XDB', 'APEX_PUBLIC_USER', 'FLOWS_FILES')
+                AND owner NOT LIKE '%$%'
+                AND EXISTS (
+                    SELECT 1 FROM dba_objects o2
+                    WHERE o2.owner = dba_objects.owner
+                    AND o2.object_type IN ('TABLE', 'VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE', 'TRIGGER')
+                )
+                ORDER BY owner
+            """)
+            
+            schemas = [row[0] for row in cursor.fetchall()]
+            cursor.close()
+            
+            if not schemas:
+                # Fallback: almeno lo schema dell'utente corrente
+                cursor = connection.cursor()
+                cursor.execute("SELECT USER FROM DUAL")
+                current_user = cursor.fetchone()[0]
+                cursor.close()
+                return [current_user]
+            
+            return schemas
+            
+        except Exception as e:
+            print(f"    ⚠️  Errore ottenimento schemi per DBA: {str(e)}")
+            # Fallback: schema dell'utente corrente
+            cursor.execute("SELECT USER FROM DUAL")
+            current_user = cursor.fetchone()[0]
+            cursor.close()
+            return [current_user]
     
     def save_to_csv(self, data, filename, headers):
         """Salva dati in formato CSV con encoding UTF-8"""
@@ -911,12 +1134,13 @@ class OracleMultiDatabaseAnalyzer:
         except Exception as e:
             print(f"    ⚠️  Errore salvataggio Excel {filename}: {str(e)}")
 
-    def save_combined_excel_report(self, oracle_data, connection_name, username):
-        """Crea un file Excel completo con tutti i dati in fogli separati"""
+    def save_combined_excel_report(self, oracle_data, connection_name, schema_name, is_dba):
+        """🆕 Crea un file Excel completo con tutti i dati in fogli separati (include tipo DBA) - MODIFICATO NAMING"""
         if not self.generate_excel:
             return  # Excel disabilitato
             
-        filename = f"{connection_name}_complete_analysis_{username}.xlsx"
+        dba_suffix = "_dba" if is_dba else "_nodba"
+        filename = f"{connection_name}_complete_analysis{dba_suffix}_{schema_name}.xlsx"  # 🔧 SCHEMA INVECE DI USERNAME
         filepath = os.path.join(self.output_dir, filename)
         
         try:
@@ -934,6 +1158,8 @@ class OracleMultiDatabaseAnalyzer:
             ws_summary = wb.create_sheet("Sommario")
             summary_data = [
                 ["Tipo Analisi", "Numero Record"],
+                ["Tipo Utente", "DBA" if is_dba else "NON-DBA"],
+                ["--- DIPENDENZE ---", ""],
                 ["Dipendenze", len(oracle_data.get('dependencies', []))],
                 ["DB Links", len(oracle_data.get('db_links', []))],
                 ["Privilegi Cross-Schema", len(oracle_data.get('cross_schema_privs', []))],
@@ -944,9 +1170,8 @@ class OracleMultiDatabaseAnalyzer:
             # Aggiungi info dimensioni se disponibili
             if oracle_data.get('size_data'):
                 size_data = oracle_data['size_data']
-                dba_status = "DBA" if size_data.get('is_dba') else "NON-DBA"
                 summary_data.extend([
-                    [f"--- DIMENSIONI ({dba_status}) ---", ""],
+                    ["--- DIMENSIONI ---", ""],
                     ["Tabelle", len(size_data.get('table_size', []))],
                     ["Indici", len(size_data.get('index_size', []))],
                     ["Segmenti", len(size_data.get('segment_size', []))],
@@ -968,18 +1193,26 @@ class OracleMultiDatabaseAnalyzer:
             ws_summary.column_dimensions['A'].width = 25
             ws_summary.column_dimensions['B'].width = 15
             
-            # 2. Fogli per ogni tipo di dato
+            # 2. Fogli per ogni tipo di dato - ❌ ALCUNI DISATTIVATI
             sheets_config = [
-                ("Dipendenze", oracle_data.get('dependencies', []), 
-                 ['SOURCE_OWNER', 'SOURCE_NAME', 'SOURCE_TYPE', 'TARGET_OWNER', 'TARGET_NAME', 'TARGET_TYPE', 'DB_LINK']),
+                # ❌ DISATTIVATO - Dependencies
+                # ("Dipendenze", oracle_data.get('dependencies', []), 
+                #  ['SOURCE_OWNER', 'SOURCE_NAME', 'SOURCE_TYPE', 'TARGET_OWNER', 'TARGET_NAME', 'TARGET_TYPE', 'DB_LINK']),
+                
                 ("DB_Links", oracle_data.get('db_links', []), 
                  ['OWNER', 'DB_LINK', 'USERNAME', 'HOST']),
-                ("Oggetti", oracle_data.get('object_summary', []), 
-                 ['OWNER', 'OBJECT_TYPE', 'COUNT']),
-                ("Privilegi_Cross_Schema", oracle_data.get('cross_schema_privs', []), 
-                 ['GRANTOR', 'GRANTEE', 'TABLE_SCHEMA', 'TABLE_NAME', 'PRIVILEGE']),
-                ("Riferimenti_Esterni", oracle_data.get('external_references', []), 
-                 ['SYNONYM_OWNER', 'SYNONYM_NAME', 'REFERENCED_OWNER', 'REFERENCED_OBJECT', 'DB_LINK'])
+                
+                # ❌ DISATTIVATO - Objects
+                # ("Oggetti", oracle_data.get('object_summary', []), 
+                #  ['OWNER', 'OBJECT_TYPE', 'COUNT']),
+                
+                # ❌ DISATTIVATO - Cross Schema Privileges  
+                # ("Privilegi_Cross_Schema", oracle_data.get('cross_schema_privs', []), 
+                #  ['GRANTOR', 'GRANTEE', 'TABLE_SCHEMA', 'TABLE_NAME', 'PRIVILEGE']),
+                
+                # ❌ DISATTIVATO - External References
+                # ("Riferimenti_Esterni", oracle_data.get('external_references', []), 
+                #  ['SYNONYM_OWNER', 'SYNONYM_NAME', 'REFERENCED_OWNER', 'REFERENCED_OBJECT', 'DB_LINK'])
             ]
             
             for sheet_name, data, headers in sheets_config:
@@ -1024,13 +1257,13 @@ class OracleMultiDatabaseAnalyzer:
         except Exception as e:
             print(f"    ⚠️  Errore salvataggio Excel completo: {str(e)}")
     
-    def save_sizes_excel_report(self, size_data, connection_name, username):
-        """🆕 Crea un file Excel dedicato alle dimensioni"""
+    def save_sizes_excel_report(self, size_data, connection_name, schema_name):
+        """🆕 Crea un file Excel dedicato alle dimensioni con headers aggiornati per tablespace - MODIFICATO NAMING"""
         if not self.generate_excel or not self.analyze_sizes:
             return  # Excel o analisi dimensioni disabilitati
             
         dba_status = "dba" if size_data.get('is_dba') else "nodba"
-        filename = f"{connection_name}_sizes_analysis_{dba_status}_{username}.xlsx"
+        filename = f"{connection_name}_sizes_analysis_{dba_status}_{schema_name}.xlsx"  # 🔧 SCHEMA INVECE DI USERNAME
         filepath = os.path.join(self.output_dir, filename)
         
         try:
@@ -1044,12 +1277,25 @@ class OracleMultiDatabaseAnalyzer:
             header_fill = PatternFill(start_color="0066CC", end_color="0066CC", fill_type="solid")
             header_alignment = Alignment(horizontal="center", vertical="center")
             
-            # Configurazione fogli per dimensioni
+            # 🆕 Configurazione fogli per dimensioni con headers aggiornati per tablespace
+            if size_data.get('is_dba'):
+                # Headers DBA per tablespace (dettagli completi)
+                tablespace_headers = [
+                    'TABLESPACE_NAME', 'STATUS', 'TYPE', 'ALLOCATED_GB', 'ALLOCATED_MB', 'ALLOCATED_BYTES',
+                    'USED_GB', 'USED_MB', 'USED_BYTES', 'FREE_GB', 'FREE_MB', 'FREE_BYTES',
+                    'PCT_USED', 'PCT_FREE', 'DATAFILE_COUNT', 'SEGMENT_COUNT'
+                ]
+            else:
+                # Headers NON-DBA per tablespace (aggregato)
+                tablespace_headers = [
+                    'TABLESPACE_NAME', 'USED_GB', 'USED_MB', 'USED_BYTES', 'FILE_COUNT', 'STATUS'
+                ]
+            
             size_sheets_config = [
                 ("Database_Size", size_data.get('database_size', []), 
                  ['METRIC_TYPE', 'OBJECT_NAME', 'SIZE_GB', 'SIZE_MB', 'SIZE_BYTES', 'FILE_COUNT']),
                 ("Tablespace_Size", size_data.get('tablespace_size', []), 
-                 ['TABLESPACE_NAME', 'SIZE_GB', 'SIZE_MB', 'SIZE_BYTES', 'FILE_COUNT', 'STATUS']),
+                 tablespace_headers),
                 ("Schema_Size", size_data.get('schema_size', []), 
                  ['OWNER', 'SIZE_GB', 'SIZE_MB', 'SIZE_BYTES', 'SEGMENT_COUNT']),
                 ("Table_Size", size_data.get('table_size', []), 
@@ -1109,18 +1355,23 @@ class OracleMultiDatabaseAnalyzer:
                     note = "Dimensioni totali database" if size_data.get('is_dba') else "Solo schema utente"
                     summary_data.append(["Database Size", len(size_data['database_size']), user_type, note])
                 if size_data.get('tablespace_size'):
-                    note = "Tutte le tablespace" if size_data.get('is_dba') else "Solo tablespace utente"
+                    note = "Dettagli completi tablespace" if size_data.get('is_dba') else "Aggregato per tablespace utente"
                     summary_data.append(["Tablespace Size", len(size_data['tablespace_size']), user_type, note])
                 if size_data.get('schema_size'):
-                    summary_data.append(["Schema Size", len(size_data['schema_size']), user_type, "Dimensioni schema"])
+                    note = "Tutti gli schemi" if size_data.get('is_dba') else "Solo schema utente"
+                    summary_data.append(["Schema Size", len(size_data['schema_size']), user_type, note])
                 if size_data.get('table_size'):
-                    summary_data.append(["Table Size", len(size_data['table_size']), user_type, "Dimensioni tabelle"])
+                    note = "Tutti gli schemi" if size_data.get('is_dba') else "Solo schema utente"
+                    summary_data.append(["Table Size", len(size_data['table_size']), user_type, note])
                 if size_data.get('index_size'):
-                    summary_data.append(["Index Size", len(size_data['index_size']), user_type, "Dimensioni indici"])
+                    note = "Tutti gli schemi" if size_data.get('is_dba') else "Solo schema utente"
+                    summary_data.append(["Index Size", len(size_data['index_size']), user_type, note])
                 if size_data.get('segment_size'):
-                    summary_data.append(["Segment Size", len(size_data['segment_size']), user_type, "Tutti i segmenti"])
+                    note = "Tutti gli schemi" if size_data.get('is_dba') else "Solo schema utente"
+                    summary_data.append(["Segment Size", len(size_data['segment_size']), user_type, note])
                 if size_data.get('code_stats'):
-                    summary_data.append(["Code Objects", len(size_data['code_stats']), user_type, "Statistiche codice PL/SQL"])
+                    note = "Tutti gli schemi accessibili" if size_data.get('is_dba') else "Solo schema utente"
+                    summary_data.append(["Code Objects", len(size_data['code_stats']), user_type, note])
                 
                 # Scrivi dati sommario
                 for row_num, row_data in enumerate(summary_data, 1):
@@ -1148,7 +1399,7 @@ class OracleMultiDatabaseAnalyzer:
             print(f"    ⚠️  Errore salvataggio Excel dimensioni: {str(e)}")
     
     def save_summary_report(self, all_results):
-        """Crea un report riassuntivo in formato testo"""
+        """🆕 Crea un report riassuntivo in formato testo con info DBA/NON-DBA"""
         report_path = os.path.join(self.output_dir, 'summary_report.txt')
         
         with open(report_path, 'w', encoding='utf-8') as f:
@@ -1159,7 +1410,10 @@ class OracleMultiDatabaseAnalyzer:
             f.write(f"Formato output: {'Excel' if self.generate_excel else 'CSV' if self.generate_csv else 'Solo Database'}\n")
             f.write(f"Output ora2pg: {self.ora2pg_output_mode}\n")
             f.write(f"Analisi dimensioni: {'Abilitata' if self.analyze_sizes else 'Disabilitata'}\n")
-            f.write(f"Prefissi tabelle: pdt_dep_ (dipendenze), pdt_sizes_dba_/pdt_sizes_nodba_ (dimensioni), ptd_ (ora2pg)\n\n")
+            f.write(f"Prefissi tabelle: pdt_dep_dba_/pdt_dep_nodba_ (dipendenze), pdt_sizes_dba_/pdt_sizes_nodba_ (dimensioni), ptd_ (ora2pg)\n")
+            f.write(f"ORA2PG: Schema configurabile per connessione, fallback logica DBA/NON-DBA\n")
+            f.write(f"Query tablespace: DBA (dettagli completi), NON-DBA (aggregato per tablespace)\n")
+            f.write(f"MODIFICHE: File Excel specifici disattivati, naming con schema invece di username\n\n")
             
             total_deps = 0
             total_links = 0
@@ -1180,34 +1434,36 @@ class OracleMultiDatabaseAnalyzer:
                     f.write(f"ERRORE: {results['error']}\n")
                     continue
                 
+                # Info privilegi utente
+                is_dba = results.get('is_dba', False)
+                if is_dba:
+                    total_dba_users += 1
+                else:
+                    total_non_dba_users += 1
+                
+                f.write(f"Privilegi utente: {'DBA' if is_dba else 'NON-DBA'}\n")
+                
                 # Sommario oggetti
                 f.write("\nOggetti database:\n")
                 for obj in results.get('object_summary', []):
                     f.write(f"  - {obj[1]}: {obj[2]}\n")
                 
-                # Conteggi
+                # Conteggi dipendenze
                 deps = len(results.get('dependencies', []))
                 links = len(results.get('db_links', []))
                 cross = len(results.get('cross_schema_privs', []))
                 ext_refs = len(results.get('external_references', []))
                 
-                f.write(f"\nDipendenze trovate: {deps}\n")
-                f.write(f"DB Links: {links}\n")
-                f.write(f"Privilegi cross-schema: {cross}\n")
-                f.write(f"Riferimenti esterni: {ext_refs}\n")
+                f.write(f"\nDipendenze (modalità {'DBA' if is_dba else 'NON-DBA'}):\n")
+                f.write(f"  - Dipendenze trovate: {deps}\n")
+                f.write(f"  - DB Links: {links}\n")
+                f.write(f"  - Privilegi cross-schema: {cross}\n")
+                f.write(f"  - Riferimenti esterni: {ext_refs}\n")
                 
-                # 🆕 Informazioni privilegi e dimensioni
+                # Informazioni dimensioni
                 if results.get('size_data'):
                     size_data = results['size_data']
-                    is_dba = size_data.get('is_dba', False)
-                    
-                    if is_dba:
-                        total_dba_users += 1
-                    else:
-                        total_non_dba_users += 1
-                    
-                    f.write(f"\nPrivilegi utente: {'DBA' if is_dba else 'NON-DBA'}\n")
-                    f.write(f"Dimensioni (modalità {'DBA' if is_dba else 'NON-DBA'}):\n")
+                    f.write(f"\nDimensioni (modalità {'DBA' if is_dba else 'NON-DBA'}):\n")
                     
                     if size_data.get('schema_size'):
                         for schema in size_data['schema_size']:
@@ -1233,9 +1489,14 @@ class OracleMultiDatabaseAnalyzer:
                 if 'ora2pg_metrics' in results:
                     cost = results['ora2pg_metrics'].get('total_cost', 0)
                     level = results['ora2pg_metrics'].get('migration_level', 'Unknown')
+                    analyzed_schemas = results['ora2pg_metrics'].get('analyzed_schemas', [])
+                    target_schema = results['ora2pg_metrics'].get('target_schema', 'auto')
                     f.write(f"\nStima migrazione ora2pg:\n")
+                    f.write(f"  - Schema target: {target_schema}\n")
                     f.write(f"  - Costo totale: {cost}\n")
                     f.write(f"  - Livello: {level}\n")
+                    if analyzed_schemas:
+                        f.write(f"  - Schemi analizzati: {', '.join(analyzed_schemas)}\n")
                     total_cost += float(cost) if cost else 0
                 
                 total_deps += deps
@@ -1257,13 +1518,17 @@ class OracleMultiDatabaseAnalyzer:
                 f.write(f"Dimensioni totali schemi: {total_schema_size_gb:.2f} GB\n")
                 f.write(f"Tabelle totali: {total_tables}\n")
                 f.write(f"Indici totali: {total_indexes}\n")
-                f.write(f"Utenti DBA: {total_dba_users}\n")
-                f.write(f"Utenti NON-DBA: {total_non_dba_users}\n")
+            
+            f.write(f"Utenti DBA: {total_dba_users}\n")
+            f.write(f"Utenti NON-DBA: {total_non_dba_users}\n")
+            f.write(f"ORA2PG: Schema configurabile per connessione, fallback logica DBA/NON-DBA\n")
+            f.write(f"Query tablespace: DBA (dettagli completi), NON-DBA (aggregato per tablespace)\n")
+            f.write(f"MODIFICHE: File Excel specifici disattivati, naming con schema invece di username\n")
         
         print(f"\n> Report riassuntivo salvato: summary_report.txt")
     
-    def run_ora2pg_analysis(self, dsn, username, password, connection_name):
-        """Esegue ora2pg per stimare i costi di migrazione con output configurabile"""
+    def run_ora2pg_analysis(self, dsn, username, password, connection_name, is_dba, db_config):
+        """🆕 Esegue ora2pg con schema configurabile o logica DBA/NON-DBA - MODIFICATO NAMING"""
         # Parsing DSN per ora2pg
         import re
         dsn_pattern = r'([^:]+):(\d+)/(.+)'
@@ -1277,9 +1542,144 @@ class OracleMultiDatabaseAnalyzer:
         else:
             oracle_dsn = dsn
         
-        # Crea file di configurazione ora2pg
-        ora2pg_conf_content = f"""# Ora2pg configuration file for migration assessment
-# Connection: {connection_name}
+        # 🆕 GESTIONE SCHEMA CONFIGURABILE
+        target_schema = None
+        
+        # 🔧 DETERMINA SCHEMA NAME PER NAMING
+        schema_name = db_config.get('schema', username)
+        
+        if 'schema' in db_config and db_config['schema']:
+            # Schema specificato nella configurazione
+            target_schema = db_config['schema']
+            analyzed_schemas = [target_schema]
+            print(f"    🎯 Schema configurato: {target_schema}")
+            print(f"    📋 ORA2PG analizzerà lo schema: {target_schema}")
+        else:
+            # Fallback alla logica DBA/NON-DBA
+            if is_dba:
+                print(f"    🔧 Modalità DBA: preparazione analisi completa database...")
+                
+                # Connetti temporaneamente per ottenere lista schemi
+                try:
+                    temp_connection = self.get_db_connection(dsn, username, password)
+                    analyzed_schemas = self.get_all_schemas_for_dba(temp_connection, db_config)
+                    temp_connection.close()
+                    
+                    print(f"    📋 Schemi da analizzare per utente DBA: {len(analyzed_schemas)}")
+                    for schema in analyzed_schemas[:10]:  # Mostra i primi 10
+                        print(f"      - {schema}")
+                    if len(analyzed_schemas) > 10:
+                        print(f"      ... e altri {len(analyzed_schemas) - 10} schemi")
+                        
+                except Exception as e:
+                    print(f"    ⚠️  Errore ottenimento schemi per DBA: {str(e)}")
+                    print(f"    🔄 Fallback: analisi solo schema {username}")
+                    analyzed_schemas = [username]
+            else:
+                # NON-DBA: solo schema dell'utente
+                analyzed_schemas = [username]
+                print(f"    🔧 Modalità NON-DBA: analisi solo schema {username}")
+        
+        # 🔧 DETERMINA MODALITÀ PER IL NOME FILE - MODIFICATO
+        if target_schema:
+            mode_desc = f"CONFIGURED"  # 🔧 SOLO "CONFIGURED" per file configurati
+            analysis_mode = f"Schema configurato: {target_schema}"
+            final_name = schema_name  # 🔧 SOLO SCHEMA PER FILE CONFIGURED
+        elif is_dba and len(analyzed_schemas) > 1:
+            mode_desc = "DBA_FULL"
+            analysis_mode = f"DBA - tutti gli schemi ({len(analyzed_schemas)})"
+            final_name = f"{mode_desc}_{schema_name}"
+        else:
+            mode_desc = "SINGLE_SCHEMA"
+            analysis_mode = f"Schema singolo: {analyzed_schemas[0]}"
+            final_name = f"{mode_desc}_{schema_name}"
+        
+        print(f"    🚀 Esecuzione ora2pg - {analysis_mode}")
+        
+        # Crea configurazione ora2pg
+        if target_schema:
+            # Schema configurato
+            ora2pg_conf_content = f"""# Ora2pg configuration file for migration assessment
+# Connection: {connection_name} - Schema Configured: {target_schema}
+
+# Oracle database connection
+ORACLE_DSN      dbi:Oracle:{oracle_dsn}
+ORACLE_USER     {username}
+ORACLE_PWD      {password}
+
+# PostgreSQL target version
+PG_VERSION      14
+
+# Output settings
+OUTPUT_DIR      {self.output_dir}
+TYPE            SHOW_REPORT
+ESTIMATE_COST   1
+
+# Report settings
+TOP_MAX         50
+HUMAN_DAYS_LIMIT 5
+COST_UNIT_VALUE 500
+
+# Configured schema
+SCHEMA          {target_schema}
+
+# Character set
+NLS_LANG        AMERICAN_AMERICA.AL32UTF8
+BINMODE         utf8
+
+# Disable some features for assessment
+SKIP_INDEXES    0
+SKIP_CONSTRAINTS 0
+SKIP_TRIGGERS   0
+
+# Debug
+DEBUG           0
+"""
+        elif is_dba and len(analyzed_schemas) > 1:
+            # DBA con più schemi
+            ora2pg_conf_content = f"""# Ora2pg configuration file for migration assessment - DBA MODE
+# Connection: {connection_name} - DBA Full Database Analysis
+# Analyzed schemas: {', '.join(analyzed_schemas)}
+
+# Oracle database connection
+ORACLE_DSN      dbi:Oracle:{oracle_dsn}
+ORACLE_USER     {username}
+ORACLE_PWD      {password}
+
+# PostgreSQL target version
+PG_VERSION      14
+
+# Output settings
+OUTPUT_DIR      {self.output_dir}
+TYPE            SHOW_REPORT
+ESTIMATE_COST   1
+
+# Report settings
+TOP_MAX         50
+HUMAN_DAYS_LIMIT 5
+COST_UNIT_VALUE 500
+
+# DBA MODE: Multiple schemas analysis
+SCHEMA          {','.join(analyzed_schemas) if len(analyzed_schemas) <= 10 else f'{username},+ALL_SCHEMA'}
+
+# Character set
+NLS_LANG        AMERICAN_AMERICA.AL32UTF8
+BINMODE         utf8
+
+# DBA specific settings
+SKIP_FKEYS      0
+SKIP_INDEXES    0
+SKIP_CONSTRAINTS 0
+SKIP_TRIGGERS   0
+SKIP_CHECKS     0
+
+# Debug
+DEBUG           0
+"""
+        else:
+            # Schema singolo (NON-DBA o DBA con un solo schema)
+            ora2pg_conf_content = f"""# Ora2pg configuration file for migration assessment
+# Connection: {connection_name} - Single Schema: {analyzed_schemas[0]}
 
 # Oracle database connection
 ORACLE_DSN      dbi:Oracle:{oracle_dsn}
@@ -1300,32 +1700,53 @@ HUMAN_DAYS_LIMIT 5
 COST_UNIT_VALUE 500
 
 # Schema to analyze
-SCHEMA          {username}
+SCHEMA          {analyzed_schemas[0]}
+
+# Character set
+NLS_LANG        AMERICAN_AMERICA.AL32UTF8
+BINMODE         utf8
 
 # Disable some features for assessment
 SKIP_INDEXES    0
 SKIP_CONSTRAINTS 0
 SKIP_TRIGGERS   0
 
-# Character set
-NLS_LANG        AMERICAN_AMERICA.AL32UTF8
-BINMODE         utf8
-
 # Debug
 DEBUG           0
 """
         
-        # File ora2pg che inizia con nome connessione
-        conf_file = os.path.join(self.output_dir, f'{connection_name}_ora2pg_{username}.conf')
+        # 🔧 File ora2pg con naming aggiornato
+        conf_file = os.path.join(self.output_dir, f'{connection_name}_ora2pg_{final_name}.conf')
         with open(conf_file, 'w', encoding='utf-8') as f:
             f.write(ora2pg_conf_content)
         
-        print(f"    > Config ora2pg creato: {connection_name}_ora2pg_{username}.conf")
+        print(f"    > Config ora2pg creato: {connection_name}_ora2pg_{final_name}.conf")
         
-        # Report ora2pg che inizia con nome connessione
-        html_output_file = os.path.join(self.output_dir, f'{connection_name}_migration_report_{username}.html')
-        txt_output_file = os.path.join(self.output_dir, f'{connection_name}_migration_report_{username}.txt')
+        # 🔧 Report ora2pg con naming aggiornato
+        html_output_file = os.path.join(self.output_dir, f'{connection_name}_migration_report_{final_name}.html')
+        txt_output_file = os.path.join(self.output_dir, f'{connection_name}_migration_report_{final_name}.txt')
         
+        # Esegui ora2pg
+        report_result = self._execute_ora2pg_command(conf_file, html_output_file, txt_output_file, connection_name, final_name)
+        
+        if report_result:
+            # Aggiungi info configurazione ai risultati
+            report_result['analyzed_schemas'] = analyzed_schemas
+            report_result['dba_mode'] = is_dba and not target_schema  # Solo se è DBA e non ha schema configurato
+            report_result['reports_count'] = 1
+            report_result['target_schema'] = target_schema if target_schema else 'auto'
+            
+            print(f"    ✅ Analisi ora2pg completata - {analysis_mode}")
+            print(f"      - Costo totale: {report_result.get('total_cost', 'N/A')}")
+            print(f"      - Oggetti trovati: {len(report_result.get('ora2pg_object_summary', []))}")
+            
+            return report_result
+        else:
+            print(f"    ⚠️  Errore ora2pg per {connection_name}")
+            return None
+    
+    def _execute_ora2pg_command(self, conf_file, html_output_file, txt_output_file, connection_name, final_name):
+        """🆕 Esegue il comando ora2pg e gestisce l'output configurabile - MODIFICATO NAMING"""
         try:
             # 🆕 GESTIONE OUTPUT CONFIGURABILE
             if self.ora2pg_output_mode == 'html_only':
@@ -1338,10 +1759,10 @@ DEBUG           0
                 result = subprocess.run(cmd, shell=True, capture_output=False, text=True)
                 
                 if result.returncode == 0:
-                    print(f"    > Report ora2pg HTML generato: {connection_name}_migration_report_{username}.html")
+                    print(f"    > Report ora2pg HTML generato: {os.path.basename(html_output_file)}")
                     return self.parse_ora2pg_report(html_output_file, None)
                 else:
-                    print(f"    ⚠️  Errore ora2pg per {connection_name}")
+                    print(f"    ⚠️  Errore ora2pg per {final_name}")
                     return None
                     
             elif self.ora2pg_output_mode == 'html_and_txt':
@@ -1363,22 +1784,22 @@ DEBUG           0
                 result_txt = subprocess.run(cmd_txt, shell=True, capture_output=False, text=True)
                 
                 if result_html.returncode == 0:
-                    print(f"    > Report ora2pg HTML generato: {connection_name}_migration_report_{username}.html")
+                    print(f"    > Report ora2pg HTML generato: {os.path.basename(html_output_file)}")
                     
                 if result_txt.returncode == 0:
-                    print(f"    > Report ora2pg TXT generato: {connection_name}_migration_report_{username}.txt")
+                    print(f"    > Report ora2pg TXT generato: {os.path.basename(txt_output_file)}")
                 
                 if result_html.returncode == 0:
                     return self.parse_ora2pg_report(html_output_file, txt_output_file if result_txt.returncode == 0 else None)
                 else:
-                    print(f"    ⚠️  Errore ora2pg per {connection_name}")
+                    print(f"    ⚠️  Errore ora2pg per {final_name}")
                     return None
             else:
                 print(f"    ⚠️  Modalità output ora2pg non riconosciuta: {self.ora2pg_output_mode}")
                 return None
                 
         except Exception as e:
-            print(f"    ⚠️  Errore esecuzione ora2pg per {connection_name}: {str(e)}")
+            print(f"    ⚠️  Errore esecuzione ora2pg per {final_name}: {str(e)}")
             return None
     
     def parse_ora2pg_report(self, html_file, txt_file):
@@ -1546,7 +1967,7 @@ DEBUG           0
         return procedures
     
     def create_database_schema(self):
-        """🆕 Crea lo schema del database con nuovi prefissi pdt_dep_, pdt_sizes_dba_/pdt_sizes_nodba_ e FK"""
+        """🆕 Crea lo schema del database con prefissi pdt_dep_dba_/pdt_dep_nodba_, pdt_sizes_dba_/pdt_sizes_nodba_ e FK"""
         try:
             conn = psycopg2.connect(**self.pg_config)
             cursor = conn.cursor()
@@ -1554,24 +1975,28 @@ DEBUG           0
             # Crea schema dedicato
             cursor.execute("CREATE SCHEMA IF NOT EXISTS oracle_migration")
             
-            # 🆕 TABELLE CON NUOVI PREFISSI
-            # Crea tabella pdt_connections (rimane uguale)
+            # 🆕 TABELLE CON NUOVI PREFISSI E CAMPO SCHEMA
+            # 🔧 Crea tabella pdt_connections con campo schema aggiunto
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS oracle_migration.pdt_connections (
                     id SERIAL PRIMARY KEY,
                     connection_name VARCHAR(100) UNIQUE NOT NULL,
                     dsn VARCHAR(255) NOT NULL,
                     username VARCHAR(100) NOT NULL,
+                    schema VARCHAR(100),
                     description TEXT,
                     is_dba BOOLEAN DEFAULT FALSE,
+                    analyze_all_schemas BOOLEAN DEFAULT FALSE,
                     created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             
-            # 🆕 TABELLE DIPENDENZE CON PREFISSO pdt_dep_
+            
+            
+            # 🆕 TABELLE DIPENDENZE DBA CON PREFISSO pdt_dep_dba_
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS oracle_migration.pdt_dep_dependencies (
+                CREATE TABLE IF NOT EXISTS oracle_migration.pdt_dep_dba_dependencies (
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1586,7 +2011,7 @@ DEBUG           0
             """)
             
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS oracle_migration.pdt_dep_db_links (
+                CREATE TABLE IF NOT EXISTS oracle_migration.pdt_dep_dba_db_links (
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1598,7 +2023,7 @@ DEBUG           0
             """)
             
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS oracle_migration.pdt_dep_cross_schema_privileges (
+                CREATE TABLE IF NOT EXISTS oracle_migration.pdt_dep_dba_cross_schema_privileges (
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1611,7 +2036,7 @@ DEBUG           0
             """)
             
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS oracle_migration.pdt_dep_external_references (
+                CREATE TABLE IF NOT EXISTS oracle_migration.pdt_dep_dba_external_references (
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1623,7 +2048,61 @@ DEBUG           0
                 )
             """)
             
-            # 🆕 TABELLE ORA2PG CON PREFISSO ptd_ (rimangono)
+            # 🆕 TABELLE DIPENDENZE NON-DBA CON PREFISSO pdt_dep_nodba_
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS oracle_migration.pdt_dep_nodba_dependencies (
+                    id SERIAL PRIMARY KEY,
+                    connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
+                    analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    source_owner VARCHAR(100),
+                    source_name VARCHAR(255),
+                    source_type VARCHAR(50),
+                    target_owner VARCHAR(100),
+                    target_name VARCHAR(255),
+                    target_type VARCHAR(50),
+                    db_link VARCHAR(100)
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS oracle_migration.pdt_dep_nodba_db_links (
+                    id SERIAL PRIMARY KEY,
+                    connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
+                    analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    owner VARCHAR(100),
+                    db_link VARCHAR(255),
+                    username VARCHAR(100),
+                    host VARCHAR(255)
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS oracle_migration.pdt_dep_nodba_cross_schema_privileges (
+                    id SERIAL PRIMARY KEY,
+                    connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
+                    analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    grantor VARCHAR(100),
+                    grantee VARCHAR(100),
+                    table_schema VARCHAR(100),
+                    table_name VARCHAR(255),
+                    privilege VARCHAR(50)
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS oracle_migration.pdt_dep_nodba_external_references (
+                    id SERIAL PRIMARY KEY,
+                    connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
+                    analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    synonym_owner VARCHAR(100),
+                    synonym_name VARCHAR(255),
+                    referenced_owner VARCHAR(100),
+                    referenced_object VARCHAR(255),
+                    db_link VARCHAR(100)
+                )
+            """)
+            
+            # 🆕 TABELLE ORA2PG CON PREFISSO ptd_ (aggiornate con campi schema)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS oracle_migration.ptd_ora2pg_estimates (
                     id SERIAL PRIMARY KEY,
@@ -1632,6 +2111,10 @@ DEBUG           0
                     schema_name VARCHAR(100),
                     total_cost NUMERIC(10,2),
                     migration_level VARCHAR(50),
+                    analyzed_schemas TEXT,
+                    target_schema VARCHAR(100),
+                    dba_mode BOOLEAN DEFAULT FALSE,
+                    reports_count INTEGER DEFAULT 1,
                     metrics JSONB
                 )
             """)
@@ -1654,7 +2137,7 @@ DEBUG           0
                 )
             """)
             
-            # 🆕 TABELLE DIMENSIONI DBA CON PREFISSO pdt_sizes_dba_
+            # 🆕 TABELLE DIMENSIONI DBA CON PREFISSO pdt_sizes_dba_ E COLONNE TABLESPACE AGGIORNATE
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS oracle_migration.pdt_sizes_dba_database_size (
                     id SERIAL PRIMARY KEY,
@@ -1669,19 +2152,31 @@ DEBUG           0
                 )
             """)
             
+            # 🔧 Tablespace DBA con colonne aggiornate per query dettagliata
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS oracle_migration.pdt_sizes_dba_tablespace_size (
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     tablespace_name VARCHAR(100),
-                    size_gb NUMERIC(12,2),
-                    size_mb NUMERIC(12,2),
-                    size_bytes BIGINT,
-                    file_count INTEGER,
-                    status VARCHAR(20)
+                    status VARCHAR(20),
+                    type VARCHAR(20),
+                    allocated_gb NUMERIC(12,2),
+                    allocated_mb NUMERIC(12,2),
+                    allocated_bytes BIGINT,
+                    used_gb NUMERIC(12,2),
+                    used_mb NUMERIC(12,2),
+                    used_bytes BIGINT,
+                    free_gb NUMERIC(12,2),
+                    free_mb NUMERIC(12,2),
+                    free_bytes BIGINT,
+                    pct_used NUMERIC(5,2),
+                    pct_free NUMERIC(5,2),
+                    datafile_count INTEGER,
+                    segment_count INTEGER
                 )
             """)
+            
             
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS oracle_migration.pdt_sizes_dba_schema_size (
@@ -1691,7 +2186,7 @@ DEBUG           0
                     owner VARCHAR(100),
                     size_gb NUMERIC(12,2),
                     size_mb NUMERIC(12,2),
-                    size_bytes BIGINT,
+                    size_bytes NUMERIC,
                     segment_count INTEGER
                 )
             """)
@@ -1781,7 +2276,7 @@ DEBUG           0
                 )
             """)
             
-            # 🆕 TABELLE DIMENSIONI NON-DBA CON PREFISSO pdt_sizes_nodba_
+            # 🆕 TABELLE DIMENSIONI NON-DBA CON PREFISSO pdt_sizes_nodba_ E COLONNE TABLESPACE AGGIORNATE
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS oracle_migration.pdt_sizes_nodba_database_size (
                     id SERIAL PRIMARY KEY,
@@ -1796,19 +2291,21 @@ DEBUG           0
                 )
             """)
             
+            # 🔧 Tablespace NON-DBA con colonne aggiornate per query aggregata
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS oracle_migration.pdt_sizes_nodba_tablespace_size (
                     id SERIAL PRIMARY KEY,
                     connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
                     analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     tablespace_name VARCHAR(100),
-                    size_gb NUMERIC(12,2),
-                    size_mb NUMERIC(12,2),
-                    size_bytes BIGINT,
+                    used_gb NUMERIC(12,2),
+                    used_mb NUMERIC(12,2),
+                    used_bytes BIGINT,
                     file_count INTEGER,
                     status VARCHAR(20)
                 )
             """)
+            
             
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS oracle_migration.pdt_sizes_nodba_schema_size (
@@ -1909,14 +2406,21 @@ DEBUG           0
             """)
             
             # 🆕 CREA INDICI CON NUOVI PREFISSI
-            # Indici dipendenze pdt_dep_
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_dep_dependencies_connection_id ON oracle_migration.pdt_dep_dependencies(connection_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_dep_db_links_connection_id ON oracle_migration.pdt_dep_db_links(connection_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_dep_cross_schema_privileges_connection_id ON oracle_migration.pdt_dep_cross_schema_privileges(connection_id)")
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_dep_external_references_connection_id ON oracle_migration.pdt_dep_external_references(connection_id)")
+            # Indici dipendenze DBA pdt_dep_dba_
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_dep_dba_dependencies_connection_id ON oracle_migration.pdt_dep_dba_dependencies(connection_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_dep_dba_db_links_connection_id ON oracle_migration.pdt_dep_dba_db_links(connection_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_dep_dba_cross_schema_privileges_connection_id ON oracle_migration.pdt_dep_dba_cross_schema_privileges(connection_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_dep_dba_external_references_connection_id ON oracle_migration.pdt_dep_dba_external_references(connection_id)")
             
-            # Indici ora2pg ptd_ (rimangono)
+            # Indici dipendenze NON-DBA pdt_dep_nodba_
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_dep_nodba_dependencies_connection_id ON oracle_migration.pdt_dep_nodba_dependencies(connection_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_dep_nodba_db_links_connection_id ON oracle_migration.pdt_dep_nodba_db_links(connection_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_dep_nodba_cross_schema_privileges_connection_id ON oracle_migration.pdt_dep_nodba_cross_schema_privileges(connection_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_dep_nodba_external_references_connection_id ON oracle_migration.pdt_dep_nodba_external_references(connection_id)")
+            
+            # Indici ora2pg ptd_ (con target_schema)
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ptd_ora2pg_estimates_connection_id ON oracle_migration.ptd_ora2pg_estimates(connection_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_ptd_ora2pg_estimates_target_schema ON oracle_migration.ptd_ora2pg_estimates(target_schema)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_ptd_ora2pg_object_summary_connection_id ON oracle_migration.ptd_ora2pg_object_summary(connection_id)")
             
             # Indici dimensioni DBA pdt_sizes_dba_
@@ -1942,14 +2446,14 @@ DEBUG           0
             conn.commit()
             cursor.close()
             conn.close()
-            print("  ✅ Schema database con nuovi prefissi (pdt_dep_, pdt_sizes_dba_/pdt_sizes_nodba_, ptd_) creato/aggiornato con successo")
+            print("  ✅ Schema database con prefissi completi e query tablespace aggiornate creato/aggiornato con successo")
             
         except Exception as e:
             print(f"  ❌ Errore creazione schema database: {e}")
             raise
     
     def get_or_create_connection_id(self, db_config, is_dba):
-        """🆕 Ottiene o crea l'ID della connessione nella tabella pdt_connections con info DBA"""
+        """🆕 Ottiene o crea l'ID della connessione nella tabella pdt_connections con schema"""
         try:
             conn = psycopg2.connect(**self.pg_config)
             cursor = conn.cursor()
@@ -1962,37 +2466,46 @@ DEBUG           0
             
             result = cursor.fetchone()
             
+            analyze_all = db_config.get('analyze_all_schemas', True)
+            schema = db_config.get('schema', None)
+            
             if result:
                 connection_id = result[0]
-                # Aggiorna i dati della connessione includendo is_dba
+                # 🔧 Aggiorna i dati della connessione includendo schema
                 cursor.execute("""
                     UPDATE oracle_migration.pdt_connections 
-                    SET dsn = %s, username = %s, description = %s, is_dba = %s, updated_date = CURRENT_TIMESTAMP
+                    SET dsn = %s, username = %s, schema = %s, description = %s, is_dba = %s, analyze_all_schemas = %s, updated_date = CURRENT_TIMESTAMP
                     WHERE id = %s
                 """, (
-                    db_config['dsn'],
+                    db_config.get('dsn', ''),
                     db_config['user'],
+                    schema,
                     db_config.get('description', ''),
                     is_dba,
+                    analyze_all,
                     connection_id
                 ))
-                print(f"    > Connessione aggiornata: ID {connection_id} (DBA: {'SÌ' if is_dba else 'NO'})")
+                schema_info = f", Schema: {schema}" if schema else ""
+                print(f"    > Connessione aggiornata: ID {connection_id} (DBA: {'SÌ' if is_dba else 'NO'}{schema_info})")
             else:
-                # Crea nuova connessione
+                # 🔧 Crea nuova connessione con schema
                 cursor.execute("""
                     INSERT INTO oracle_migration.pdt_connections 
-                    (connection_name, dsn, username, description, is_dba)
-                    VALUES (%s, %s, %s, %s, %s)
+                    (connection_name, dsn, username, schema, description, is_dba, analyze_all_schemas)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
                 """, (
                     db_config['connection_name'],
-                    db_config['dsn'],
+                    db_config.get('dsn', ''),
                     db_config['user'],
+                    schema,
                     db_config.get('description', ''),
-                    is_dba
+                    is_dba,
+                    analyze_all
                 ))
                 connection_id = cursor.fetchone()[0]
-                print(f"    > Nuova connessione creata: ID {connection_id} (DBA: {'SÌ' if is_dba else 'NO'})")
+                schema_info = f", Schema: {schema}" if schema else ""
+                print(f"    > Nuova connessione creata: ID {connection_id} (DBA: {'SÌ' if is_dba else 'NO'}{schema_info})")
             
             conn.commit()
             cursor.close()
@@ -2004,27 +2517,25 @@ DEBUG           0
             raise
     
     def cleanup_existing_data(self, connection_id, is_dba):
-        """🆕 Cancella i dati esistenti per una connessione dalle tabelle con nuovi prefissi"""
+        """🆕 Cancella i dati esistenti per una connessione dalle tabelle con prefissi DBA/NON-DBA"""
         try:
             conn = psycopg2.connect(**self.pg_config)
             cursor = conn.cursor()
             
-            # 🆕 Lista delle tabelle da pulire con nuovi prefissi
+            # 🆕 Lista delle tabelle da pulire con prefissi DBA/NON-DBA
             tables_to_clean = [
-                # Tabelle ora2pg (ptd_)
+                # Tabelle ora2pg (ptd_) - sempre
                 'ptd_ora2pg_object_summary',
-                'ptd_ora2pg_estimates',
-                
-                # Tabelle dipendenze (pdt_dep_)
-                'pdt_dep_external_references',
-                'pdt_dep_cross_schema_privileges',
-                'pdt_dep_db_links',
-                'pdt_dep_dependencies'
+                'ptd_ora2pg_estimates'
             ]
             
-            # Aggiungi tabelle dimensioni in base al tipo utente
+            # Aggiungi tabelle dipendenze in base al tipo utente
             if is_dba:
                 tables_to_clean.extend([
+                    'pdt_dep_dba_external_references',
+                    'pdt_dep_dba_cross_schema_privileges',
+                    'pdt_dep_dba_db_links',
+                    'pdt_dep_dba_dependencies',
                     'pdt_sizes_dba_code_lines',
                     'pdt_sizes_dba_code_stats',
                     'pdt_sizes_dba_segment_size',
@@ -2036,6 +2547,10 @@ DEBUG           0
                 ])
             else:
                 tables_to_clean.extend([
+                    'pdt_dep_nodba_external_references',
+                    'pdt_dep_nodba_cross_schema_privileges',
+                    'pdt_dep_nodba_db_links',
+                    'pdt_dep_nodba_dependencies',
                     'pdt_sizes_nodba_code_lines',
                     'pdt_sizes_nodba_code_stats',
                     'pdt_sizes_nodba_segment_size',
@@ -2071,9 +2586,9 @@ DEBUG           0
             raise
     
     def save_to_postgresql(self, all_results):
-        """🆕 Salva tutti i risultati nel database PostgreSQL con nuovi prefissi e gestione DBA/NON-DBA"""
+        """🆕 Salva tutti i risultati nel database PostgreSQL con schema_name = schema configurato"""
         try:
-            print(f"\n💾 Creazione/aggiornamento schema database con nuovi prefissi...")
+            print(f"\n💾 Creazione/aggiornamento schema database con query tablespace aggiornate...")
             self.create_database_schema()
             
             total_records = 0
@@ -2099,9 +2614,7 @@ DEBUG           0
                     continue
                 
                 # Determina se è DBA dai dati raccolti
-                is_dba = False
-                if 'size_data' in results and results['size_data']:
-                    is_dba = results['size_data'].get('is_dba', False)
+                is_dba = results.get('is_dba', False)
                 
                 connection_id = self.get_or_create_connection_id(db_config, is_dba)
                 
@@ -2112,12 +2625,16 @@ DEBUG           0
                 conn = psycopg2.connect(**self.pg_config)
                 cursor = conn.cursor()
                 
-                schema_name = results.get('schema', 'UNKNOWN')
+                # 🔧 schema_name = schema configurato nel JSON, non l'utente
+                target_schema = db_config.get('schema', results.get('schema', 'UNKNOWN'))
                 
-                # 🆕 INSERISCI DIPENDENZE CON PREFISSO pdt_dep_
+                # 🆕 INSERISCI DIPENDENZE CON PREFISSI DBA/NON-DBA
+                dep_prefix = "pdt_dep_dba_" if is_dba else "pdt_dep_nodba_"
+                print(f"      > Inserimento dipendenze con prefisso: {dep_prefix}")
+                
                 for dep in results.get('dependencies', []):
-                    cursor.execute("""
-                        INSERT INTO oracle_migration.pdt_dep_dependencies 
+                    cursor.execute(f"""
+                        INSERT INTO oracle_migration.{dep_prefix}dependencies 
                         (connection_id, source_owner, source_name, source_type, 
                          target_owner, target_name, target_type, db_link)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -2125,30 +2642,30 @@ DEBUG           0
                     total_records += 1
                 
                 for link in results.get('db_links', []):
-                    cursor.execute("""
-                        INSERT INTO oracle_migration.pdt_dep_db_links 
+                    cursor.execute(f"""
+                        INSERT INTO oracle_migration.{dep_prefix}db_links 
                         (connection_id, owner, db_link, username, host)
                         VALUES (%s, %s, %s, %s, %s)
                     """, (connection_id, *link))
                     total_records += 1
                 
                 for priv in results.get('cross_schema_privs', []):
-                    cursor.execute("""
-                        INSERT INTO oracle_migration.pdt_dep_cross_schema_privileges 
+                    cursor.execute(f"""
+                        INSERT INTO oracle_migration.{dep_prefix}cross_schema_privileges 
                         (connection_id, grantor, grantee, table_schema, table_name, privilege)
                         VALUES (%s, %s, %s, %s, %s, %s)
                     """, (connection_id, *priv))
                     total_records += 1
                 
                 for ref in results.get('external_references', []):
-                    cursor.execute("""
-                        INSERT INTO oracle_migration.pdt_dep_external_references 
+                    cursor.execute(f"""
+                        INSERT INTO oracle_migration.{dep_prefix}external_references 
                         (connection_id, synonym_owner, synonym_name, referenced_owner, referenced_object, db_link)
                         VALUES (%s, %s, %s, %s, %s, %s)
                     """, (connection_id, *ref))
                     total_records += 1
                 
-                # INSERISCI ORA2PG CON PREFISSO ptd_ (rimangono)
+                # 🆕 INSERISCI ORA2PG CON schema_name = schema configurato
                 if 'ora2pg_metrics' in results and 'ora2pg_object_summary' in results['ora2pg_metrics']:
                     for obj in results['ora2pg_metrics']['ora2pg_object_summary']:
                         cursor.execute("""
@@ -2159,7 +2676,7 @@ DEBUG           0
                             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """, (
                             connection_id,
-                            schema_name,
+                            target_schema,  # 🔧 Usa schema configurato
                             obj['object_name'],
                             obj['object_number'],
                             obj['invalid_count'],
@@ -2171,23 +2688,34 @@ DEBUG           0
                             obj.get('procedure_cost')
                         ))
                         total_records += 1
-                    print(f"      > Inseriti {len(results['ora2pg_metrics']['ora2pg_object_summary'])} record ptd_ora2pg_object_summary")
+                    print(f"      > Inseriti {len(results['ora2pg_metrics']['ora2pg_object_summary'])} record ptd_ora2pg_object_summary (schema: {target_schema})")
                 
                 if 'ora2pg_metrics' in results:
+                    # 🆕 SALVA INFO COMPLETE ORA2PG CON schema_name = schema configurato
+                    analyzed_schemas_str = ', '.join(results['ora2pg_metrics'].get('analyzed_schemas', [target_schema]))
+                    configured_target_schema = results['ora2pg_metrics'].get('target_schema', 'auto')
+                    
                     cursor.execute("""
                         INSERT INTO oracle_migration.ptd_ora2pg_estimates 
-                        (connection_id, schema_name, total_cost, migration_level, metrics)
-                        VALUES (%s, %s, %s, %s, %s)
+                        (connection_id, schema_name, total_cost, migration_level, 
+                         analyzed_schemas, target_schema, dba_mode, reports_count, metrics)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         connection_id, 
-                        schema_name, 
+                        target_schema,  # 🔧 Usa schema configurato
                         results['ora2pg_metrics'].get('total_cost', 0),
                         results['ora2pg_metrics'].get('migration_level', 'Unknown'),
+                        analyzed_schemas_str,
+                        configured_target_schema,
+                        results['ora2pg_metrics'].get('dba_mode', False),
+                        results['ora2pg_metrics'].get('reports_count', 1),
                         json.dumps(results['ora2pg_metrics'])
                     ))
                     total_records += 1
+                    
+                    print(f"      > Inserito record ptd_ora2pg_estimates (schema: {target_schema}, target: {configured_target_schema})")
                 
-                # 🆕 INSERISCI DATI DIMENSIONI CON PREFISSI DIFFERENZIATI
+                # 🆕 INSERISCI DATI DIMENSIONI CON PREFISSI DBA/NON-DBA E QUERY TABLESPACE AGGIORNATE
                 if self.analyze_sizes and 'size_data' in results:
                     size_data = results['size_data']
                     
@@ -2205,13 +2733,24 @@ DEBUG           0
                         """, (connection_id, *db_size))
                         total_records += 1
                     
-                    # Tablespace Size
+                    # 🔧 Tablespace Size con colonne aggiornate
                     for ts_size in size_data.get('tablespace_size', []):
-                        cursor.execute(f"""
-                            INSERT INTO oracle_migration.{size_prefix}tablespace_size 
-                            (connection_id, tablespace_name, size_gb, size_mb, size_bytes, file_count, status)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """, (connection_id, *ts_size))
+                        if is_dba:
+                            # DBA: query dettagliata con tutte le colonne
+                            cursor.execute(f"""
+                                INSERT INTO oracle_migration.{size_prefix}tablespace_size 
+                                (connection_id, tablespace_name, status, type, allocated_gb, allocated_mb, allocated_bytes,
+                                 used_gb, used_mb, used_bytes, free_gb, free_mb, free_bytes,
+                                 pct_used, pct_free, datafile_count, segment_count)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            """, (connection_id, *ts_size))
+                        else:
+                            # NON-DBA: query aggregata
+                            cursor.execute(f"""
+                                INSERT INTO oracle_migration.{size_prefix}tablespace_size 
+                                (connection_id, tablespace_name, used_gb, used_mb, used_bytes, file_count, status)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            """, (connection_id, *ts_size))
                         total_records += 1
                     
                     # Schema Size
@@ -2252,7 +2791,7 @@ DEBUG           0
                     
                     # Code Lines (limitato per performance)
                     code_lines = size_data.get('code_lines', [])
-                    if len(code_lines) <= 1:
+                    if len(code_lines) <= 10000:
                         for code_line in code_lines:
                             cursor.execute(f"""
                                 INSERT INTO oracle_migration.{size_prefix}code_lines 
@@ -2260,8 +2799,8 @@ DEBUG           0
                                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                             """, (connection_id, *code_line))
                             total_records += 1
-                    #else:
-                    #    print(f"      ⚠️  Troppi record code_lines ({len(code_lines)}), inserimento saltato per performance")
+                    else:
+                        print(f"      ⚠️  Troppi record code_lines ({len(code_lines)}), inserimento saltato per performance")
                     
                     # Code Stats
                     for code_stats in size_data.get('code_stats', []):
@@ -2280,8 +2819,11 @@ DEBUG           0
                 
                 print(f"      ✅ Dati salvati per {connection_name}")
             
-            print(f"\n> Dati salvati in PostgreSQL con nuovi prefissi con successo! ({total_records} record totali)")
-            print(f"  📋 Prefissi utilizzati: pdt_dep_ (dipendenze), pdt_sizes_dba_/pdt_sizes_nodba_ (dimensioni), ptd_ (ora2pg)")
+            print(f"\n> Dati salvati in PostgreSQL con schema completo aggiornato! ({total_records} record totali)")
+            print(f"  📋 Prefissi utilizzati: pdt_dep_dba_/pdt_dep_nodba_ (dipendenze), pdt_sizes_dba_/pdt_sizes_nodba_ (dimensioni), ptd_ (ora2pg)")
+            print(f"  🔧 Query tablespace: DBA (dettagli completi), NON-DBA (aggregato per tablespace)")
+            print(f"  📊 schema_name nelle tabelle ora2pg = schema configurato nel JSON")
+            print(f"  🔧 MODIFICHE: File Excel specifici disattivati, naming con schema invece di username")
             
         except Exception as e:
             print(f"\n❌ Errore nel salvataggio su PostgreSQL: {e}")
@@ -2290,8 +2832,22 @@ DEBUG           0
             traceback.print_exc()
     
     def analyze_database(self, db_config):
-        """🆕 Analizza un singolo database Oracle con rilevamento DBA"""
+        """🆕 Analizza un singolo database Oracle con rilevamento DBA e query separate - MODIFICATO NAMING"""
         connection_name = db_config['connection_name']
+        
+        # Verifica se DSN è presente
+        if 'dsn' not in db_config or not db_config['dsn']:
+            print(f"\n{'='*70}")
+            print(f"⚠️  SALTATO - Database: {connection_name}")
+            print(f"🔗 Motivo: DSN mancante nella configurazione")
+            print(f"{'='*70}")
+            return {
+                'schema': db_config['user'],
+                'connection_name': connection_name,
+                'dsn': 'N/A',
+                'error': 'DSN mancante nella configurazione'
+            }
+        
         db_name = f"{connection_name}_{db_config['user']}@{db_config['dsn']}"
         
         print(f"\n{'='*70}")
@@ -2299,6 +2855,8 @@ DEBUG           0
         print(f"🔗 Connessione: {db_config['user']}@{db_config['dsn']}")
         if 'description' in db_config:
             print(f"📝 Descrizione: {db_config['description']}")
+        if 'schema' in db_config:
+            print(f"🎯 Schema ora2pg configurato: {db_config['schema']}")
         print(f"{'='*70}")
         
         results = {
@@ -2321,116 +2879,93 @@ DEBUG           0
             is_dba = self.check_dba_privileges(connection, db_config)
             results['is_dba'] = is_dba
             
-            # Estrai dipendenze
-            oracle_data = self.get_oracle_dependencies(connection)
+            # 🆕 ESTRAI DIPENDENZE CON QUERY SPECIFICHE PER DBA/NON-DBA
+            print("  📊 Estrazione dipendenze database...")
+            oracle_data = self.get_oracle_dependencies(connection, is_dba, db_config)
             results.update(oracle_data)
+            print(f"  ✅ Dipendenze estratte con successo (modalità: {'DBA' if is_dba else 'NON-DBA'})")
             
             # 🆕 ESTRAI DIMENSIONI (se abilitato) CON QUERY SPECIFICHE PER DBA/NON-DBA
             if self.analyze_sizes:
-                print("  📏 Estrazione dimensioni database...")
-                size_data = self.get_oracle_sizes(connection, is_dba)
+                print("  📏 Estrazione dimensioni database con query tablespace aggiornate...")
+                size_data = self.get_oracle_sizes(connection, is_dba, db_config)
                 results['size_data'] = size_data
                 oracle_data['size_data'] = size_data  # Aggiungi anche a oracle_data per Excel
-                print(f"  ✅ Dimensioni estratte con successo (modalità: {'DBA' if is_dba else 'NON-DBA'})")
+                print(f"  ✅ Dimensioni estratte con successo (modalità: {'DBA (dettagli completi)' if is_dba else 'NON-DBA (aggregato)'})")
             
             # ==========================================
-            # SEZIONE GENERAZIONE FILE DI OUTPUT
+            # SEZIONE GENERAZIONE FILE DI OUTPUT - MODIFICATA
             # ==========================================
             print("  📄 Generazione file di output...")
             
+            # 🔧 DETERMINA SCHEMA NAME PER NAMING
+            schema_name = db_config.get('schema', db_config['user'])  # Usa schema se configurato, altrimenti user
+            
             # === GENERAZIONE FILE CSV (DISABILITATA) ===
             if self.generate_csv:
-                print("    📋 Creazione file CSV...")
+                dba_suffix = "_dba" if is_dba else "_nodba"
+                print(f"    📋 Creazione file CSV con suffisso: {dba_suffix}")
                 
-                if oracle_data['dependencies']:
-                    self.save_to_csv(
-                        oracle_data['dependencies'],
-                        f"{connection_name}_dependencies_{db_config['user']}.csv",
-                        ['SOURCE_OWNER', 'SOURCE_NAME', 'SOURCE_TYPE', 
-                         'TARGET_OWNER', 'TARGET_NAME', 'TARGET_TYPE', 'DB_LINK']
-                    )
+                # ❌ DISATTIVATO - Dependencies CSV
+                # if oracle_data['dependencies']:
+                #     self.save_to_csv(...)
                 
                 if oracle_data['db_links']:
                     self.save_to_csv(
                         oracle_data['db_links'],
-                        f"{connection_name}_dblinks_{db_config['user']}.csv",
+                        f"{connection_name}_dblinks{dba_suffix}_{schema_name}.csv",  # 🔧 SCHEMA INVECE DI USER
                         ['OWNER', 'DB_LINK', 'USERNAME', 'HOST']
                     )
                 
-                if oracle_data['object_summary']:
-                    self.save_to_csv(
-                        oracle_data['object_summary'],
-                        f"{connection_name}_objects_{db_config['user']}.csv",
-                        ['OWNER', 'OBJECT_TYPE', 'COUNT']
-                    )
+                # ❌ DISATTIVATO - Objects CSV  
+                # if oracle_data['object_summary']:
+                #     self.save_to_csv(...)
                 
-                if oracle_data['cross_schema_privs']:
-                    self.save_to_csv(
-                        oracle_data['cross_schema_privs'],
-                        f"{connection_name}_cross_schema_privs_{db_config['user']}.csv",
-                        ['GRANTOR', 'GRANTEE', 'TABLE_SCHEMA', 'TABLE_NAME', 'PRIVILEGE']
-                    )
+                # ❌ DISATTIVATO - Cross Schema Privs CSV
+                # if oracle_data['cross_schema_privs']:
+                #     self.save_to_csv(...)
                 
-                if oracle_data['external_references']:
-                    self.save_to_csv(
-                        oracle_data['external_references'],
-                        f"{connection_name}_external_references_{db_config['user']}.csv",
-                        ['SYNONYM_OWNER', 'SYNONYM_NAME', 'REFERENCED_OWNER', 'REFERENCED_OBJECT', 'DB_LINK']
-                    )
+                # ❌ DISATTIVATO - External References CSV
+                # if oracle_data['external_references']:
+                #     self.save_to_csv(...)
             
-            # === GENERAZIONE FILE EXCEL (ABILITATA) ===
+            # === GENERAZIONE FILE EXCEL (ABILITATA CON MODIFICHE) ===
             if self.generate_excel:
-                print("    📊 Creazione file Excel...")
+                dba_suffix = "_dba" if is_dba else "_nodba"
+                print(f"    📊 Creazione file Excel con suffisso: {dba_suffix}")
                 
-                if oracle_data['dependencies']:
-                    self.save_to_excel(
-                        oracle_data['dependencies'],
-                        f"{connection_name}_dependencies_{db_config['user']}.xlsx",
-                        ['SOURCE_OWNER', 'SOURCE_NAME', 'SOURCE_TYPE', 
-                         'TARGET_OWNER', 'TARGET_NAME', 'TARGET_TYPE', 'DB_LINK'],
-                        "Dipendenze"
-                    )
+                # ❌ DISATTIVATO - Dependencies Excel
+                # if oracle_data['dependencies']:
+                #     self.save_to_excel(...)
                 
                 if oracle_data['db_links']:
                     self.save_to_excel(
                         oracle_data['db_links'],
-                        f"{connection_name}_dblinks_{db_config['user']}.xlsx",
+                        f"{connection_name}_dblinks{dba_suffix}_{schema_name}.xlsx",  # 🔧 SCHEMA INVECE DI USER
                         ['OWNER', 'DB_LINK', 'USERNAME', 'HOST'],
                         "DB_Links"
                     )
                 
-                if oracle_data['object_summary']:
-                    self.save_to_excel(
-                        oracle_data['object_summary'],
-                        f"{connection_name}_objects_{db_config['user']}.xlsx",
-                        ['OWNER', 'OBJECT_TYPE', 'COUNT'],
-                        "Oggetti"
-                    )
+                # ❌ DISATTIVATO - Objects Excel
+                # if oracle_data['object_summary']:
+                #     self.save_to_excel(...)
                 
-                if oracle_data['cross_schema_privs']:
-                    self.save_to_excel(
-                        oracle_data['cross_schema_privs'],
-                        f"{connection_name}_cross_schema_privs_{db_config['user']}.xlsx",
-                        ['GRANTOR', 'GRANTEE', 'TABLE_SCHEMA', 'TABLE_NAME', 'PRIVILEGE'],
-                        "Privilegi_Cross_Schema"
-                    )
+                # ❌ DISATTIVATO - Cross Schema Privs Excel
+                # if oracle_data['cross_schema_privs']:
+                #     self.save_to_excel(...)
                 
-                if oracle_data['external_references']:
-                    self.save_to_excel(
-                        oracle_data['external_references'],
-                        f"{connection_name}_external_references_{db_config['user']}.xlsx",
-                        ['SYNONYM_OWNER', 'SYNONYM_NAME', 'REFERENCED_OWNER', 'REFERENCED_OBJECT', 'DB_LINK'],
-                        "Riferimenti_Esterni"
-                    )
+                # ❌ DISATTIVATO - External References Excel
+                # if oracle_data['external_references']:
+                #     self.save_to_excel(...)
                 
                 # === REPORT EXCEL COMPLETO ===
                 print("    📈 Creazione report Excel completo...")
-                self.save_combined_excel_report(oracle_data, connection_name, db_config['user'])
+                self.save_combined_excel_report(oracle_data, connection_name, schema_name, is_dba)  # 🔧 SCHEMA INVECE DI USER
                 
-                # 🆕 === REPORT EXCEL DIMENSIONI ===
+                # 🆕 === REPORT EXCEL DIMENSIONI con headers tablespace aggiornati ===
                 if self.analyze_sizes and 'size_data' in results:
-                    print("    📏 Creazione report Excel dimensioni...")
-                    self.save_sizes_excel_report(results['size_data'], connection_name, db_config['user'])
+                    print("    📏 Creazione report Excel dimensioni con query tablespace aggiornate...")
+                    self.save_sizes_excel_report(results['size_data'], connection_name, schema_name)  # 🔧 SCHEMA INVECE DI USER
             
             print("  ✅ File di output generati con successo")
             # ==========================================
@@ -2439,17 +2974,21 @@ DEBUG           0
             
             connection.close()
             
-            # Esegui ora2pg
+            # 🆕 ESEGUI ORA2PG CON GESTIONE SCHEMA CONFIGURABILE
             print(f"  📊 Esecuzione analisi ora2pg (modalità: {self.ora2pg_output_mode})...")
             ora2pg_results = self.run_ora2pg_analysis(
                 db_config['dsn'],
                 db_config['user'],
                 db_config['password'],
-                connection_name
+                connection_name,
+                is_dba,
+                db_config
             )
             if ora2pg_results:
                 results['ora2pg_metrics'] = ora2pg_results
-                print(f"  ✅ Analisi ora2pg completata - Costo: {ora2pg_results.get('total_cost', 'N/A')}")
+                target_schema = ora2pg_results.get('target_schema', 'auto')
+                mode_desc = f"schema: {target_schema}" if target_schema != 'auto' else ("DB completo" if ora2pg_results.get('dba_mode') else "solo schema")
+                print(f"  ✅ Analisi ora2pg completata ({mode_desc}) - Costo: {ora2pg_results.get('total_cost', 'N/A')}")
             
             print(f"  🎉 Analisi {connection_name} completata con successo")
             
@@ -2471,8 +3010,13 @@ DEBUG           0
         print(f"📊 Formato output: {'Excel ✅' if self.generate_excel else ''}{'CSV ✅' if self.generate_csv else ''}")
         print(f"📋 Output ora2pg: {self.ora2pg_output_mode}")
         print(f"📏 Analisi dimensioni: {'Abilitata ✅' if self.analyze_sizes else 'Disabilitata ❌'}")
-        print(f"🗄️  Database PostgreSQL: Nuovi prefissi (pdt_dep_, pdt_sizes_dba_/pdt_sizes_nodba_, ptd_)")
+        print(f"🗄️  Database PostgreSQL: Prefissi completi (pdt_dep_dba_/pdt_dep_nodba_, pdt_sizes_dba_/pdt_sizes_nodba_, ptd_)")
         print(f"🔍 Rilevamento privilegi DBA: Automatico/Configurazione")
+        print(f"🎯 Query differenziate: DBA vs NON-DBA per dipendenze e dimensioni")
+        print(f"🔧 ORA2PG: Schema configurabile per connessione, fallback logica DBA/NON-DBA")
+        print(f"📊 Query tablespace: DBA (dettagli completi), NON-DBA (aggregato per tablespace)")
+        print(f"🗃️  schema_name nelle tabelle ora2pg = schema configurato nel JSON")
+        print(f"🔧 MODIFICHE: File Excel specifici disattivati, naming con schema invece di username")
         
         all_results = {}
         successful_analyses = 0
@@ -2485,7 +3029,7 @@ DEBUG           0
             try:
                 results = self.analyze_database(db_config)
                 connection_name = db_config['connection_name']
-                db_key = f"{connection_name}_{db_config['user']}@{db_config['dsn']}"
+                db_key = f"{connection_name}_{db_config['user']}@{db_config.get('dsn', 'N/A')}"
                 all_results[db_key] = results
                 
                 if results.get('error'):
@@ -2502,7 +3046,7 @@ DEBUG           0
         self.save_summary_report(all_results)
         
         # Salva tutto in PostgreSQL
-        print(f"\n💾 Salvataggio dati in PostgreSQL con nuovi prefissi...")
+        print(f"\n💾 Salvataggio dati in PostgreSQL con query tablespace aggiornate...")
         self.save_to_postgresql(all_results)
         
         # Report finale
@@ -2516,8 +3060,14 @@ DEBUG           0
         print(f"📊 Formato output: {'Excel ✅' if self.generate_excel else ''}{'CSV ✅' if self.generate_csv else ''}")
         print(f"📋 Output ora2pg: {self.ora2pg_output_mode}")
         print(f"📏 Analisi dimensioni: {'Abilitata ✅' if self.analyze_sizes else 'Disabilitata ❌'}")
-        print(f"🗄️  Database PostgreSQL: Nuovi prefissi (pdt_dep_, pdt_sizes_dba_/pdt_sizes_nodba_, ptd_)")
-        print(f"🔍 Rilevamento privilegi DBA: Implementato")
+        print(f"🗄️  Database PostgreSQL: Prefissi completi (pdt_dep_dba_/pdt_dep_nodba_, pdt_sizes_dba_/pdt_sizes_nodba_, ptd_)")
+        print(f"🔍 Rilevamento privilegi DBA: Implementato con query differenziate")
+        print(f"🎯 Query ottimizzate: DBA (tutti gli schemi) vs NON-DBA (solo schema utente)")
+        print(f"🔧 ORA2PG: Schema configurabile per connessione, fallback logica DBA/NON-DBA")
+        print(f"📊 Query tablespace: DBA (dettagli completi), NON-DBA (aggregato per tablespace)")
+        print(f"🗃️  schema_name nelle tabelle ora2pg = schema configurato nel JSON")
+        print(f"🔧 Correzione: Usato 'owner' invece di 'table_schema' nelle query dba_tab_privs/all_tab_privs")
+        print(f"🔧 MODIFICHE APPLICATE: File Excel specifici disattivati, naming con schema invece di username")
         print(f"{'='*70}")
         
         # Lista file generati
@@ -2531,7 +3081,8 @@ def main():
     import argparse
     
     print("🎯 Oracle Multi-Database Dependency Analyzer")
-    print("📋 Versione con rilevamento DBA, nuovi prefissi tabelle, output ora2pg configurabile e analisi dimensioni")
+    print("📋 Versione con query tablespace aggiornate, schema configurabile ora2pg, correzione query dba_tab_privs")
+    print("🔧 MODIFICHE: File Excel specifici disattivati, naming con schema invece di username")
     
     parser = argparse.ArgumentParser(description='Oracle Multi-Database Dependency Analyzer')
     parser.add_argument(
