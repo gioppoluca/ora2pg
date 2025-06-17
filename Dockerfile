@@ -85,7 +85,7 @@ RUN apt-get update && \
 
 # Install Python libraries
 RUN pip3 install --no-cache-dir \
-    oracledb psycopg2-binary openpyxl beautifulsoup4
+    oracledb psycopg2-binary openpyxl beautifulsoup4 pandas
 
 # Copy Oracle Instant Client from builder
 COPY --from=builder /opt/oracle /opt/oracle
