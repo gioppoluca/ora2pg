@@ -73,7 +73,7 @@ USER root
 # Install runtime dependencies (minimal set)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      curl lsb-release libaio1 libaio-dev python3 python3-pip python3-distutils python3-venv && \
+      curl nano lsb-release libaio1 libaio-dev python3 python3-pip python3-distutils python3-venv && \
     ln -sf python3 /usr/bin/python && \
     echo "deb http://apt.dalibo.org/labs $(lsb_release -cs)-dalibo main" > /etc/apt/sources.list.d/dalibo-labs.list && \
     curl -fsSL -o /etc/apt/trusted.gpg.d/dalibo-labs.gpg https://apt.dalibo.org/labs/debian-dalibo.gpg && \
