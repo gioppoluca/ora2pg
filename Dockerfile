@@ -1,104 +1,74 @@
-# -------------------------------
-# Builder Stage: Compile oracle_fdw
-# -------------------------------
-FROM ghcr.io/cloudnative-pg/postgresql:17.4 AS builder
+FROM perl:slim
 
-LABEL maintainer="your_name@domain.com" \
-      description="Builder image for oracle_fdw with Oracle Instant Client" \
-      version="1.0"
+ARG ORA2PG_VERSION=25.0
+ARG ORA_VERSION=19.26
+ARG ORA_VERSION_POST=0.0.0-1.el8
 
-ENV PG_MAJOR=17
-ENV ORACLE_VERSION=19_26
-ENV INSTANT_CLIENT_DIR=/opt/oracle/instantclient
+# ugly fix for "update-alternatives" missing directories in slim image
+RUN mkdir -p /usr/share/man/man1 &&\
+    mkdir -p /usr/share/man/man7
+RUN apt-get update && apt-get install -y -q --no-install-recommends \
+        cpanminus \
+        unzip \
+        curl \
+        nano \
+        ca-certificates \
+        rpm \
+        alien \
+        libaio1 \
+        # Install postgresql
+        postgresql-client \
+        # Install mysql
+        libdbd-mysql \
+        # Install Perl Database Interface
+        libdbi-perl \
+        bzip2 \
+        libpq-dev \
+        gnupg2 \
+        lsb-release libaio1 libaio-dev python3 python3-pip python3-distutils python3-venv \
+        libdbd-pg-perl
 
-USER root
+ADD /assets /assets
 
-# Install build dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-      curl lsb-release build-essential libaio1 libaio-dev git unzip \
-      postgresql-server-dev-${PG_MAJOR}
+# Install Oracle Client
+RUN mkdir /usr/lib/oracle/$ORA_VERSION/client64/network/admin -p
 
-# Add Dalibo Labs repository and install anonymizer (if needed for build)
-RUN echo "deb http://apt.dalibo.org/labs $(lsb_release -cs)-dalibo main" > /etc/apt/sources.list.d/dalibo-labs.list && \
-    curl -fsSL -o /etc/apt/trusted.gpg.d/dalibo-labs.gpg https://apt.dalibo.org/labs/debian-dalibo.gpg && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends locales-all \
-      postgresql_anonymizer_${PG_MAJOR}
+RUN arch=$(rpm --eval '%{_arch}') && \
+    alien -i "/assets/oracle-instantclient$ORA_VERSION-basic-$ORA_VERSION.$ORA_VERSION_POST.${arch}.rpm" && \
+    alien -i "/assets/oracle-instantclient$ORA_VERSION-devel-$ORA_VERSION.$ORA_VERSION_POST.${arch}.rpm" && \
+    alien -i "/assets/oracle-instantclient$ORA_VERSION-sqlplus-$ORA_VERSION.$ORA_VERSION_POST.${arch}.rpm"
 
-# Install Oracle Instant Client Basic + SDK
-RUN curl -L -H "Cookie: oraclelicense=accept-securebackup-cookie" -o /tmp/instantclient-basic.zip \
-      https://download.oracle.com/otn_software/linux/instantclient/1926000/instantclient-basic-linux.x64-19.26.0.0.0dbru.zip && \
-    curl -L -H "Cookie: oraclelicense=accept-securebackup-cookie" -o /tmp/instantclient-sdk.zip \
-      https://download.oracle.com/otn_software/linux/instantclient/1926000/instantclient-sdk-linux.x64-19.26.0.0.0dbru.zip && \
-    mkdir -p /opt/oracle && \
-    unzip -o /tmp/instantclient-basic.zip -d /opt/oracle && \
-    unzip -o /tmp/instantclient-sdk.zip -d /opt/oracle && \
-    ln -sf /opt/oracle/instantclient_${ORACLE_VERSION} ${INSTANT_CLIENT_DIR} && \
-    echo "${INSTANT_CLIENT_DIR}" > /etc/ld.so.conf.d/oracle-instantclient.conf && \
-    ldconfig && \
-    rm /tmp/instantclient-*.zip
+ENV ORACLE_HOME=/usr/lib/oracle/$ORA_VERSION/client64
+ENV TNS_ADMIN=/usr/lib/oracle/$ORA_VERSION/client64/network/admin
+ENV LD_LIBRARY_PATH=/usr/lib/oracle/$ORA_VERSION/client64/lib
+ENV PATH=$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/lib/oracle/$ORA_VERSION/client64/bin
 
-# Environment for oracle_fdw compilation
-ENV OCI_LIB_DIR=${INSTANT_CLIENT_DIR}
-ENV OCI_INCLUDE_DIR=${INSTANT_CLIENT_DIR}/sdk/include
-ENV ORACLE_HOME=${INSTANT_CLIENT_DIR}
-ENV LD_LIBRARY_PATH=${INSTANT_CLIENT_DIR}
+# Install DBI module with Postgres, Oracle and Compress::Zlib module
+RUN cpan install Test::NoWarnings &&\
+    cpan install DBI &&\
+    cpan install DBD::Pg &&\
+    cpan install Bundle::Compress::Zlib &&\
+    cpanm install DBD::Oracle@1.82
 
-# Clone and compile oracle_fdw
-RUN git clone https://github.com/laurenz/oracle_fdw.git /tmp/oracle_fdw && \
-    cd /tmp/oracle_fdw && \
-    make && make install && \
-    rm -rf /tmp/oracle_fdw
-
-# Clean build dependencies
-RUN apt-get purge -y --auto-remove build-essential git unzip && \
-    rm -rf /var/lib/apt/lists/* /var/cache/apt/*
-
-# -------------------------------
-# Final Stage: Runtime Image
-# -------------------------------
-FROM ghcr.io/cloudnative-pg/postgresql:17.4
-
-LABEL maintainer="your_name@domain.com" \
-      description="PostgreSQL runtime with oracle_fdw, anonymizer, Python 3.8+, and data tools" \
-      version="1.0"
-
-ENV PG_MAJOR=17
-ENV ORACLE_VERSION=19_26
-ENV INSTANT_CLIENT_DIR=/opt/oracle/instantclient
-
-USER root
-
-# Install runtime dependencies (minimal set)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-      curl nano lsb-release libaio1 libaio-dev python3 python3-pip python3-distutils python3-venv && \
-    ln -sf python3 /usr/bin/python && \
-    echo "deb http://apt.dalibo.org/labs $(lsb_release -cs)-dalibo main" > /etc/apt/sources.list.d/dalibo-labs.list && \
-    curl -fsSL -o /etc/apt/trusted.gpg.d/dalibo-labs.gpg https://apt.dalibo.org/labs/debian-dalibo.gpg && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends locales-all \
-      postgresql_anonymizer_${PG_MAJOR} && \
+# Install ora2pg
+RUN curl -L -o /tmp/ora2pg.zip https://github.com/darold/ora2pg/archive/v$ORA2PG_VERSION.zip &&\
+    (cd /tmp && unzip ora2pg.zip && rm -f ora2pg.zip) &&\
+    mv /tmp/ora2pg* /tmp/ora2pg &&\
+    (cd /tmp/ora2pg && perl Makefile.PL && make && make install) &&\
+    ln -sf python3 /usr/bin/python &&\
     apt-get purge -y --auto-remove && \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/*
-
 # Install Python libraries
-RUN pip3 install --no-cache-dir \
+RUN pip3 install --no-cache-dir --break-system-packages \
     oracledb psycopg2-binary openpyxl beautifulsoup4 pandas
 
-# Copy Oracle Instant Client from builder
-COPY --from=builder /opt/oracle /opt/oracle
-RUN ln -sf /opt/oracle/instantclient_${ORACLE_VERSION} ${INSTANT_CLIENT_DIR} && \
-    echo "${INSTANT_CLIENT_DIR}" > /etc/ld.so.conf.d/oracle-instantclient.conf && ldconfig
+# config directory
+RUN mkdir /config
+RUN cp /etc/ora2pg/ora2pg.conf.dist /etc/ora2pg/ora2pg.conf.backup  &&\
+    cp /etc/ora2pg/ora2pg.conf.dist /config/ora2pg.conf
+VOLUME /config
 
-# Copy oracle_fdw extension
-COPY --from=builder /usr/lib/postgresql /usr/lib/postgresql
-COPY --from=builder /usr/share/postgresql/17/extension /usr/share/postgresql/17/extension
-COPY --from=builder /usr/share/doc/postgresql-doc-17/extension /usr/share/doc/postgresql-doc-17/extension
-COPY oracle_analyzer.py /usr/local/bin/oracle_analyzer.py
-RUN chmod +x /usr/local/bin/oracle_analyzer.py
+# output directory
+RUN mkdir /data
+VOLUME /data
 
-# /usr/local/bin is our working dir for both script and config
-WORKDIR /usr/local/bin
-USER 26
