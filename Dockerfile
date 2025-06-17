@@ -68,6 +68,8 @@ RUN cp /etc/ora2pg/ora2pg.conf.dist /etc/ora2pg/ora2pg.conf.backup  &&\
     cp /etc/ora2pg/ora2pg.conf.dist /config/ora2pg.conf
 VOLUME /config
 
+COPY oracle_analyzer.py /tmp/oracle_analyzer.py
+
 # output directory
 RUN mkdir /data
 VOLUME /data
