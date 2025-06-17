@@ -202,7 +202,7 @@ class OracleMultiDatabaseAnalyzer:
             "ora2pg_output_mode": "html_and_txt",
             "analyze_sizes": True
         }
-        
+
         with open(self.config_file, 'w', encoding='utf-8') as f:
             json.dump(sample_config, f, indent=2, ensure_ascii=False)
         
@@ -1193,26 +1193,26 @@ class OracleMultiDatabaseAnalyzer:
             ws_summary.column_dimensions['A'].width = 25
             ws_summary.column_dimensions['B'].width = 15
             
-            # 2. Fogli per ogni tipo di dato - ❌ ALCUNI DISATTIVATI
+            # 2. Fogli per ogni tipo di dato - ✅ TUTTI I FOGLI ABILITATI NEL REPORT COMPLETO
             sheets_config = [
-                # ❌ DISATTIVATO - Dependencies
-                # ("Dipendenze", oracle_data.get('dependencies', []), 
-                #  ['SOURCE_OWNER', 'SOURCE_NAME', 'SOURCE_TYPE', 'TARGET_OWNER', 'TARGET_NAME', 'TARGET_TYPE', 'DB_LINK']),
+                # ✅ RIATTIVATO - Dependencies nel report completo
+                ("Dipendenze", oracle_data.get('dependencies', []), 
+                 ['SOURCE_OWNER', 'SOURCE_NAME', 'SOURCE_TYPE', 'TARGET_OWNER', 'TARGET_NAME', 'TARGET_TYPE', 'DB_LINK']),
                 
                 ("DB_Links", oracle_data.get('db_links', []), 
                  ['OWNER', 'DB_LINK', 'USERNAME', 'HOST']),
                 
-                # ❌ DISATTIVATO - Objects
-                # ("Oggetti", oracle_data.get('object_summary', []), 
-                #  ['OWNER', 'OBJECT_TYPE', 'COUNT']),
+                # ✅ RIATTIVATO - Objects nel report completo
+                ("Oggetti", oracle_data.get('object_summary', []), 
+                 ['OWNER', 'OBJECT_TYPE', 'COUNT']),
                 
-                # ❌ DISATTIVATO - Cross Schema Privileges  
-                # ("Privilegi_Cross_Schema", oracle_data.get('cross_schema_privs', []), 
-                #  ['GRANTOR', 'GRANTEE', 'TABLE_SCHEMA', 'TABLE_NAME', 'PRIVILEGE']),
+                # ✅ RIATTIVATO - Cross Schema Privileges nel report completo  
+                ("Privilegi_Cross_Schema", oracle_data.get('cross_schema_privs', []), 
+                 ['GRANTOR', 'GRANTEE', 'TABLE_SCHEMA', 'TABLE_NAME', 'PRIVILEGE']),
                 
-                # ❌ DISATTIVATO - External References
-                # ("Riferimenti_Esterni", oracle_data.get('external_references', []), 
-                #  ['SYNONYM_OWNER', 'SYNONYM_NAME', 'REFERENCED_OWNER', 'REFERENCED_OBJECT', 'DB_LINK'])
+                # ✅ RIATTIVATO - External References nel report completo
+                ("Riferimenti_Esterni", oracle_data.get('external_references', []), 
+                 ['SYNONYM_OWNER', 'SYNONYM_NAME', 'REFERENCED_OWNER', 'REFERENCED_OBJECT', 'DB_LINK'])
             ]
             
             for sheet_name, data, headers in sheets_config:
@@ -1253,9 +1253,9 @@ class OracleMultiDatabaseAnalyzer:
             # Salva file
             wb.save(filepath)
             print(f"    > Excel completo salvato: {filename}")
-            
+          
         except Exception as e:
-            print(f"    ⚠️  Errore salvataggio Excel completo: {str(e)}")
+          print(f"    ⚠️  Errore salvataggio Excel completo: {str(e)}")
     
     def save_sizes_excel_report(self, size_data, connection_name, schema_name):
         """🆕 Crea un file Excel dedicato alle dimensioni con headers aggiornati per tablespace - MODIFICATO NAMING"""
