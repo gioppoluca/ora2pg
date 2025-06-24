@@ -2791,7 +2791,8 @@ DEBUG           0
                     
                     # Code Lines (limitato per performance)
                     code_lines = size_data.get('code_lines', [])
-                    if len(code_lines) <= 10000:
+                    #if len(code_lines) <= 10000:
+                    if len(code_lines) <= -1:    
                         for code_line in code_lines:
                             cursor.execute(f"""
                                 INSERT INTO oracle_migration.{size_prefix}code_lines 
