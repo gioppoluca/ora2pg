@@ -6,6 +6,7 @@ configurazioni esterne multiple, gestione connessioni normalizzata, output Excel
 ORA2PG: Utilizza schema specificato nel config JSON, altrimenti logica DBA/NON-DBA
 Query tablespace aggiornate: DBA (dettagli completi), NON-DBA (aggregato per tablespace)
 MODIFICHE: File Excel specifici disattivati, naming con schema invece di username
+NUOVO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB
 """
 
 import oracledb
@@ -60,6 +61,13 @@ class OracleMultiDatabaseAnalyzer:
         # 🆕 CONFIGURAZIONE OUTPUT ORA2PG
         # Opzioni: 'html_only', 'html_and_txt'
         self.ora2pg_output_mode = self.config.get('ora2pg_output_mode', 'html_and_txt')
+        
+        # 🆕 INIZIALIZZA SCHEMA DATABASE UNA SOLA VOLTA
+        print(f"💾 Inizializzazione schema database PostgreSQL...")
+        self.create_database_schema()
+        
+        # 🆕 STRUTTURA PER RACCOGLIERE RISULTATI SUMMARY
+        self.summary_results = {}
         
         # Log delle connessioni caricate
         for conn in self.oracle_connections:
@@ -1398,8 +1406,10 @@ class OracleMultiDatabaseAnalyzer:
         except Exception as e:
             print(f"    ⚠️  Errore salvataggio Excel dimensioni: {str(e)}")
     
-    def save_summary_report(self, all_results):
-        """🆕 Crea un report riassuntivo in formato testo con info DBA/NON-DBA"""
+    def save_summary_report(self):
+        """🆕 Crea un report riassuntivo in formato testo con info DBA/NON-DBA - MODIFICATO per elaborazione sequenziale"""
+        all_results = self.summary_results
+        
         report_path = os.path.join(self.output_dir, 'summary_report.txt')
         
         with open(report_path, 'w', encoding='utf-8') as f:
@@ -1413,7 +1423,8 @@ class OracleMultiDatabaseAnalyzer:
             f.write(f"Prefissi tabelle: pdt_dep_dba_/pdt_dep_nodba_ (dipendenze), pdt_sizes_dba_/pdt_sizes_nodba_ (dimensioni), ptd_ (ora2pg)\n")
             f.write(f"ORA2PG: Schema configurabile per connessione, fallback logica DBA/NON-DBA\n")
             f.write(f"Query tablespace: DBA (dettagli completi), NON-DBA (aggregato per tablespace)\n")
-            f.write(f"MODIFICHE: File Excel specifici disattivati, naming con schema invece di username\n\n")
+            f.write(f"MODIFICHE: File Excel specifici disattivati, naming con schema invece di username\n")
+            f.write(f"🆕 NUOVO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB\n\n")
             
             total_deps = 0
             total_links = 0
@@ -1524,6 +1535,7 @@ class OracleMultiDatabaseAnalyzer:
             f.write(f"ORA2PG: Schema configurabile per connessione, fallback logica DBA/NON-DBA\n")
             f.write(f"Query tablespace: DBA (dettagli completi), NON-DBA (aggregato per tablespace)\n")
             f.write(f"MODIFICHE: File Excel specifici disattivati, naming con schema invece di username\n")
+            f.write(f"🆕 NUOVO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB\n")
         
         print(f"\n> Report riassuntivo salvato: summary_report.txt")
     
@@ -2585,255 +2597,233 @@ DEBUG           0
             print(f"    ❌ Errore pulizia dati esistenti: {e}")
             raise
     
-    def save_to_postgresql(self, all_results):
-        """🆕 Salva tutti i risultati nel database PostgreSQL con schema_name = schema configurato"""
+    def save_to_postgresql_single(self, results, db_config):
+        """🆕 Salva i risultati di un singolo database nel database PostgreSQL - NUOVO METODO PER ELABORAZIONE SEQUENZIALE"""
         try:
-            print(f"\n💾 Creazione/aggiornamento schema database con query tablespace aggiornate...")
-            self.create_database_schema()
+            connection_name = results.get('connection_name')
+            if not connection_name:
+                print(f"    ⚠️  connection_name mancante, saltato inserimento PostgreSQL")
+                return
+            
+            if results.get('error'):
+                print(f"    > Saltato PostgreSQL per errore: {results['error']}")
+                return
+            
+            print(f"    💾 Inserimento dati in PostgreSQL...")
+            
+            # Determina se è DBA dai dati raccolti
+            is_dba = results.get('is_dba', False)
+            
+            connection_id = self.get_or_create_connection_id(db_config, is_dba)
+            
+            # Pulisci dati esistenti
+            self.cleanup_existing_data(connection_id, is_dba)
+            
+            # Connessione per inserimenti
+            conn = psycopg2.connect(**self.pg_config)
+            cursor = conn.cursor()
+            
+            # 🔧 schema_name = schema configurato nel JSON, non l'utente
+            target_schema = db_config.get('schema', results.get('schema', 'UNKNOWN'))
             
             total_records = 0
             
-            # Elabora ogni database
-            for db_key, results in all_results.items():
-                if results.get('error'):
-                    print(f"    > Saltato {db_key} per errore: {results['error']}")
-                    continue
-                
-                connection_name = results.get('connection_name')
-                if not connection_name:
-                    print(f"    ⚠️  Saltato {db_key}: connection_name mancante")
-                    continue
-                
-                print(f"\n    📊 Elaborazione {connection_name}...")
-                
-                # Ottieni connection_id e privilegi DBA
-                db_config = next((conn for conn in self.oracle_connections 
-                                if conn['connection_name'] == connection_name), None)
-                if not db_config:
-                    print(f"    ⚠️  Configurazione non trovata per {connection_name}")
-                    continue
-                
-                # Determina se è DBA dai dati raccolti
-                is_dba = results.get('is_dba', False)
-                
-                connection_id = self.get_or_create_connection_id(db_config, is_dba)
-                
-                # Pulisci dati esistenti
-                self.cleanup_existing_data(connection_id, is_dba)
-                
-                # Connessione per inserimenti
-                conn = psycopg2.connect(**self.pg_config)
-                cursor = conn.cursor()
-                
-                # 🔧 schema_name = schema configurato nel JSON, non l'utente
-                target_schema = db_config.get('schema', results.get('schema', 'UNKNOWN'))
-                
-                # 🆕 INSERISCI DIPENDENZE CON PREFISSI DBA/NON-DBA
-                dep_prefix = "pdt_dep_dba_" if is_dba else "pdt_dep_nodba_"
-                print(f"      > Inserimento dipendenze con prefisso: {dep_prefix}")
-                
-                for dep in results.get('dependencies', []):
-                    cursor.execute(f"""
-                        INSERT INTO oracle_migration.{dep_prefix}dependencies 
-                        (connection_id, source_owner, source_name, source_type, 
-                         target_owner, target_name, target_type, db_link)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    """, (connection_id, *dep))
-                    total_records += 1
-                
-                for link in results.get('db_links', []):
-                    cursor.execute(f"""
-                        INSERT INTO oracle_migration.{dep_prefix}db_links 
-                        (connection_id, owner, db_link, username, host)
-                        VALUES (%s, %s, %s, %s, %s)
-                    """, (connection_id, *link))
-                    total_records += 1
-                
-                for priv in results.get('cross_schema_privs', []):
-                    cursor.execute(f"""
-                        INSERT INTO oracle_migration.{dep_prefix}cross_schema_privileges 
-                        (connection_id, grantor, grantee, table_schema, table_name, privilege)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                    """, (connection_id, *priv))
-                    total_records += 1
-                
-                for ref in results.get('external_references', []):
-                    cursor.execute(f"""
-                        INSERT INTO oracle_migration.{dep_prefix}external_references 
-                        (connection_id, synonym_owner, synonym_name, referenced_owner, referenced_object, db_link)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                    """, (connection_id, *ref))
-                    total_records += 1
-                
-                # 🆕 INSERISCI ORA2PG CON schema_name = schema configurato
-                if 'ora2pg_metrics' in results and 'ora2pg_object_summary' in results['ora2pg_metrics']:
-                    for obj in results['ora2pg_metrics']['ora2pg_object_summary']:
-                        cursor.execute("""
-                            INSERT INTO oracle_migration.ptd_ora2pg_object_summary (
-                                connection_id, schema_name, object_name, object_number, 
-                                invalid_count, estimated_cost, comments, details,
-                                detail_type, procedure_name, procedure_cost
-                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """, (
-                            connection_id,
-                            target_schema,  # 🔧 Usa schema configurato
-                            obj['object_name'],
-                            obj['object_number'],
-                            obj['invalid_count'],
-                            obj['estimated_cost'],
-                            obj['comments'],
-                            obj['details'],
-                            obj.get('detail_type', 'MAIN'),
-                            obj.get('procedure_name'),
-                            obj.get('procedure_cost')
-                        ))
-                        total_records += 1
-                    print(f"      > Inseriti {len(results['ora2pg_metrics']['ora2pg_object_summary'])} record ptd_ora2pg_object_summary (schema: {target_schema})")
-                
-                if 'ora2pg_metrics' in results:
-                    # 🆕 SALVA INFO COMPLETE ORA2PG CON schema_name = schema configurato
-                    analyzed_schemas_str = ', '.join(results['ora2pg_metrics'].get('analyzed_schemas', [target_schema]))
-                    configured_target_schema = results['ora2pg_metrics'].get('target_schema', 'auto')
-                    
+            # 🆕 INSERISCI DIPENDENZE CON PREFISSI DBA/NON-DBA
+            dep_prefix = "pdt_dep_dba_" if is_dba else "pdt_dep_nodba_"
+            print(f"      > Inserimento dipendenze con prefisso: {dep_prefix}")
+            
+            for dep in results.get('dependencies', []):
+                cursor.execute(f"""
+                    INSERT INTO oracle_migration.{dep_prefix}dependencies 
+                    (connection_id, source_owner, source_name, source_type, 
+                     target_owner, target_name, target_type, db_link)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """, (connection_id, *dep))
+                total_records += 1
+            
+            for link in results.get('db_links', []):
+                cursor.execute(f"""
+                    INSERT INTO oracle_migration.{dep_prefix}db_links 
+                    (connection_id, owner, db_link, username, host)
+                    VALUES (%s, %s, %s, %s, %s)
+                """, (connection_id, *link))
+                total_records += 1
+            
+            for priv in results.get('cross_schema_privs', []):
+                cursor.execute(f"""
+                    INSERT INTO oracle_migration.{dep_prefix}cross_schema_privileges 
+                    (connection_id, grantor, grantee, table_schema, table_name, privilege)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (connection_id, *priv))
+                total_records += 1
+            
+            for ref in results.get('external_references', []):
+                cursor.execute(f"""
+                    INSERT INTO oracle_migration.{dep_prefix}external_references 
+                    (connection_id, synonym_owner, synonym_name, referenced_owner, referenced_object, db_link)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (connection_id, *ref))
+                total_records += 1
+            
+            # 🆕 INSERISCI ORA2PG CON schema_name = schema configurato
+            if 'ora2pg_metrics' in results and 'ora2pg_object_summary' in results['ora2pg_metrics']:
+                for obj in results['ora2pg_metrics']['ora2pg_object_summary']:
                     cursor.execute("""
-                        INSERT INTO oracle_migration.ptd_ora2pg_estimates 
-                        (connection_id, schema_name, total_cost, migration_level, 
-                         analyzed_schemas, target_schema, dba_mode, reports_count, metrics)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        INSERT INTO oracle_migration.ptd_ora2pg_object_summary (
+                            connection_id, schema_name, object_name, object_number, 
+                            invalid_count, estimated_cost, comments, details,
+                            detail_type, procedure_name, procedure_cost
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
-                        connection_id, 
+                        connection_id,
                         target_schema,  # 🔧 Usa schema configurato
-                        results['ora2pg_metrics'].get('total_cost', 0),
-                        results['ora2pg_metrics'].get('migration_level', 'Unknown'),
-                        analyzed_schemas_str,
-                        configured_target_schema,
-                        results['ora2pg_metrics'].get('dba_mode', False),
-                        results['ora2pg_metrics'].get('reports_count', 1),
-                        json.dumps(results['ora2pg_metrics'])
+                        obj['object_name'],
+                        obj['object_number'],
+                        obj['invalid_count'],
+                        obj['estimated_cost'],
+                        obj['comments'],
+                        obj['details'],
+                        obj.get('detail_type', 'MAIN'),
+                        obj.get('procedure_name'),
+                        obj.get('procedure_cost')
                     ))
                     total_records += 1
-                    
-                    print(f"      > Inserito record ptd_ora2pg_estimates (schema: {target_schema}, target: {configured_target_schema})")
-                
-                # 🆕 INSERISCI DATI DIMENSIONI CON PREFISSI DBA/NON-DBA E QUERY TABLESPACE AGGIORNATE
-                if self.analyze_sizes and 'size_data' in results:
-                    size_data = results['size_data']
-                    
-                    # Determina prefisso in base a privilegi DBA
-                    size_prefix = "pdt_sizes_dba_" if is_dba else "pdt_sizes_nodba_"
-                    
-                    print(f"      > Inserimento dimensioni con prefisso: {size_prefix}")
-                    
-                    # Database Size
-                    for db_size in size_data.get('database_size', []):
-                        cursor.execute(f"""
-                            INSERT INTO oracle_migration.{size_prefix}database_size 
-                            (connection_id, metric_type, object_name, size_gb, size_mb, size_bytes, file_count)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
-                        """, (connection_id, *db_size))
-                        total_records += 1
-                    
-                    # 🔧 Tablespace Size con colonne aggiornate
-                    for ts_size in size_data.get('tablespace_size', []):
-                        if is_dba:
-                            # DBA: query dettagliata con tutte le colonne
-                            cursor.execute(f"""
-                                INSERT INTO oracle_migration.{size_prefix}tablespace_size 
-                                (connection_id, tablespace_name, status, type, allocated_gb, allocated_mb, allocated_bytes,
-                                 used_gb, used_mb, used_bytes, free_gb, free_mb, free_bytes,
-                                 pct_used, pct_free, datafile_count, segment_count)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                            """, (connection_id, *ts_size))
-                        else:
-                            # NON-DBA: query aggregata
-                            cursor.execute(f"""
-                                INSERT INTO oracle_migration.{size_prefix}tablespace_size 
-                                (connection_id, tablespace_name, used_gb, used_mb, used_bytes, file_count, status)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                            """, (connection_id, *ts_size))
-                        total_records += 1
-                    
-                    # Schema Size
-                    for schema_size in size_data.get('schema_size', []):
-                        cursor.execute(f"""
-                            INSERT INTO oracle_migration.{size_prefix}schema_size 
-                            (connection_id, owner, size_gb, size_mb, size_bytes, segment_count)
-                            VALUES (%s, %s, %s, %s, %s, %s)
-                        """, (connection_id, *schema_size))
-                        total_records += 1
-                    
-                    # Table Size
-                    for table_size in size_data.get('table_size', []):
-                        cursor.execute(f"""
-                            INSERT INTO oracle_migration.{size_prefix}table_size 
-                            (connection_id, owner, table_name, segment_type, tablespace_name, size_gb, size_mb, size_bytes, blocks, extents)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """, (connection_id, *table_size))
-                        total_records += 1
-                    
-                    # Index Size
-                    for index_size in size_data.get('index_size', []):
-                        cursor.execute(f"""
-                            INSERT INTO oracle_migration.{size_prefix}index_size 
-                            (connection_id, owner, index_name, segment_type, tablespace_name, size_gb, size_mb, size_bytes, blocks, extents)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """, (connection_id, *index_size))
-                        total_records += 1
-                    
-                    # Segment Size
-                    for segment_size in size_data.get('segment_size', []):
-                        cursor.execute(f"""
-                            INSERT INTO oracle_migration.{size_prefix}segment_size 
-                            (connection_id, owner, segment_name, segment_type, tablespace_name, size_gb, size_mb, size_bytes, blocks, extents, initial_extent, next_extent, max_extents)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """, (connection_id, *segment_size))
-                        total_records += 1
-                    
-                    # Code Lines (limitato per performance)
-                    code_lines = size_data.get('code_lines', [])
-                    #if len(code_lines) <= 10000:
-                    if len(code_lines) <= -1:    
-                        for code_line in code_lines:
-                            cursor.execute(f"""
-                                INSERT INTO oracle_migration.{size_prefix}code_lines 
-                                (connection_id, owner, object_name, object_type, char_length, byte_length, line_number, line_text)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                            """, (connection_id, *code_line))
-                            total_records += 1
-                    else:
-                        print(f"      ⚠️  Troppi record code_lines ({len(code_lines)}), inserimento saltato per performance")
-                    
-                    # Code Stats
-                    for code_stats in size_data.get('code_stats', []):
-                        cursor.execute(f"""
-                            INSERT INTO oracle_migration.{size_prefix}code_stats 
-                            (connection_id, owner, object_name, object_type, total_lines, total_chars, total_bytes, first_line, last_line)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """, (connection_id, *code_stats))
-                        total_records += 1
-                    
-                    print(f"      > Inseriti dati dimensioni per {connection_name} (modalità: {'DBA' if is_dba else 'NON-DBA'})")
-                
-                conn.commit()
-                cursor.close()
-                conn.close()
-                
-                print(f"      ✅ Dati salvati per {connection_name}")
+                print(f"      > Inseriti {len(results['ora2pg_metrics']['ora2pg_object_summary'])} record ptd_ora2pg_object_summary")
             
-            print(f"\n> Dati salvati in PostgreSQL con schema completo aggiornato! ({total_records} record totali)")
-            print(f"  📋 Prefissi utilizzati: pdt_dep_dba_/pdt_dep_nodba_ (dipendenze), pdt_sizes_dba_/pdt_sizes_nodba_ (dimensioni), ptd_ (ora2pg)")
-            print(f"  🔧 Query tablespace: DBA (dettagli completi), NON-DBA (aggregato per tablespace)")
-            print(f"  📊 schema_name nelle tabelle ora2pg = schema configurato nel JSON")
-            print(f"  🔧 MODIFICHE: File Excel specifici disattivati, naming con schema invece di username")
+            if 'ora2pg_metrics' in results:
+                # 🆕 SALVA INFO COMPLETE ORA2PG CON schema_name = schema configurato
+                analyzed_schemas_str = ', '.join(results['ora2pg_metrics'].get('analyzed_schemas', [target_schema]))
+                configured_target_schema = results['ora2pg_metrics'].get('target_schema', 'auto')
+                
+                cursor.execute("""
+                    INSERT INTO oracle_migration.ptd_ora2pg_estimates 
+                    (connection_id, schema_name, total_cost, migration_level, 
+                     analyzed_schemas, target_schema, dba_mode, reports_count, metrics)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    connection_id, 
+                    target_schema,  # 🔧 Usa schema configurato
+                    results['ora2pg_metrics'].get('total_cost', 0),
+                    results['ora2pg_metrics'].get('migration_level', 'Unknown'),
+                    analyzed_schemas_str,
+                    configured_target_schema,
+                    results['ora2pg_metrics'].get('dba_mode', False),
+                    results['ora2pg_metrics'].get('reports_count', 1),
+                    json.dumps(results['ora2pg_metrics'])
+                ))
+                total_records += 1
+                
+                print(f"      > Inserito record ptd_ora2pg_estimates")
+            
+            # 🆕 INSERISCI DATI DIMENSIONI CON PREFISSI DBA/NON-DBA E QUERY TABLESPACE AGGIORNATE
+            if self.analyze_sizes and 'size_data' in results:
+                size_data = results['size_data']
+                
+                # Determina prefisso in base a privilegi DBA
+                size_prefix = "pdt_sizes_dba_" if is_dba else "pdt_sizes_nodba_"
+                
+                print(f"      > Inserimento dimensioni con prefisso: {size_prefix}")
+                
+                # Database Size
+                for db_size in size_data.get('database_size', []):
+                    cursor.execute(f"""
+                        INSERT INTO oracle_migration.{size_prefix}database_size 
+                        (connection_id, metric_type, object_name, size_gb, size_mb, size_bytes, file_count)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """, (connection_id, *db_size))
+                    total_records += 1
+                
+                # 🔧 Tablespace Size con colonne aggiornate
+                for ts_size in size_data.get('tablespace_size', []):
+                    if is_dba:
+                        # DBA: query dettagliata con tutte le colonne
+                        cursor.execute(f"""
+                            INSERT INTO oracle_migration.{size_prefix}tablespace_size 
+                            (connection_id, tablespace_name, status, type, allocated_gb, allocated_mb, allocated_bytes,
+                             used_gb, used_mb, used_bytes, free_gb, free_mb, free_bytes,
+                             pct_used, pct_free, datafile_count, segment_count)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (connection_id, *ts_size))
+                    else:
+                        # NON-DBA: query aggregata
+                        cursor.execute(f"""
+                            INSERT INTO oracle_migration.{size_prefix}tablespace_size 
+                            (connection_id, tablespace_name, used_gb, used_mb, used_bytes, file_count, status)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """, (connection_id, *ts_size))
+                    total_records += 1
+                
+                # Schema Size
+                for schema_size in size_data.get('schema_size', []):
+                    cursor.execute(f"""
+                        INSERT INTO oracle_migration.{size_prefix}schema_size 
+                        (connection_id, owner, size_gb, size_mb, size_bytes, segment_count)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """, (connection_id, *schema_size))
+                    total_records += 1
+                
+                # Table Size
+                for table_size in size_data.get('table_size', []):
+                    cursor.execute(f"""
+                        INSERT INTO oracle_migration.{size_prefix}table_size 
+                        (connection_id, owner, table_name, segment_type, tablespace_name, size_gb, size_mb, size_bytes, blocks, extents)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (connection_id, *table_size))
+                    total_records += 1
+                
+                # Index Size
+                for index_size in size_data.get('index_size', []):
+                    cursor.execute(f"""
+                        INSERT INTO oracle_migration.{size_prefix}index_size 
+                        (connection_id, owner, index_name, segment_type, tablespace_name, size_gb, size_mb, size_bytes, blocks, extents)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (connection_id, *index_size))
+                    total_records += 1
+                
+                # Segment Size
+                for segment_size in size_data.get('segment_size', []):
+                    cursor.execute(f"""
+                        INSERT INTO oracle_migration.{size_prefix}segment_size 
+                        (connection_id, owner, segment_name, segment_type, tablespace_name, size_gb, size_mb, size_bytes, blocks, extents, initial_extent, next_extent, max_extents)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (connection_id, *segment_size))
+                    total_records += 1
+                
+                # Code Lines (limitato per performance)
+                code_lines = size_data.get('code_lines', [])
+                if len(code_lines) <= -1:  # Disabilitato per performance    
+                    for code_line in code_lines:
+                        cursor.execute(f"""
+                            INSERT INTO oracle_migration.{size_prefix}code_lines 
+                            (connection_id, owner, object_name, object_type, char_length, byte_length, line_number, line_text)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (connection_id, *code_line))
+                        total_records += 1
+                else:
+                    print(f"      ⚠️  Code_lines saltato per performance ({len(code_lines)} record)")
+                
+                # Code Stats
+                for code_stats in size_data.get('code_stats', []):
+                    cursor.execute(f"""
+                        INSERT INTO oracle_migration.{size_prefix}code_stats 
+                        (connection_id, owner, object_name, object_type, total_lines, total_chars, total_bytes, first_line, last_line)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (connection_id, *code_stats))
+                    total_records += 1
+            
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            print(f"    ✅ Dati salvati in PostgreSQL ({total_records} record)")
             
         except Exception as e:
-            print(f"\n❌ Errore nel salvataggio su PostgreSQL: {e}")
-            print("I dati sono comunque stati salvati nei file di output")
+            print(f"    ❌ Errore salvataggio PostgreSQL: {e}")
             import traceback
             traceback.print_exc()
     
     def analyze_database(self, db_config):
-        """🆕 Analizza un singolo database Oracle con rilevamento DBA e query separate - MODIFICATO NAMING"""
+        """🆕 Analizza un singolo database Oracle con rilevamento DBA e query separate - MODIFICATO per elaborazione sequenziale"""
         connection_name = db_config['connection_name']
         
         # Verifica se DSN è presente
@@ -2895,7 +2885,7 @@ DEBUG           0
                 print(f"  ✅ Dimensioni estratte con successo (modalità: {'DBA (dettagli completi)' if is_dba else 'NON-DBA (aggregato)'})")
             
             # ==========================================
-            # SEZIONE GENERAZIONE FILE DI OUTPUT - MODIFICATA
+            # SEZIONE GENERAZIONE FILE DI OUTPUT
             # ==========================================
             print("  📄 Generazione file di output...")
             
@@ -2907,66 +2897,34 @@ DEBUG           0
                 dba_suffix = "_dba" if is_dba else "_nodba"
                 print(f"    📋 Creazione file CSV con suffisso: {dba_suffix}")
                 
-                # ❌ DISATTIVATO - Dependencies CSV
-                # if oracle_data['dependencies']:
-                #     self.save_to_csv(...)
-                
                 if oracle_data['db_links']:
                     self.save_to_csv(
                         oracle_data['db_links'],
-                        f"{connection_name}_dblinks{dba_suffix}_{schema_name}.csv",  # 🔧 SCHEMA INVECE DI USER
+                        f"{connection_name}_dblinks{dba_suffix}_{schema_name}.csv",
                         ['OWNER', 'DB_LINK', 'USERNAME', 'HOST']
                     )
-                
-                # ❌ DISATTIVATO - Objects CSV  
-                # if oracle_data['object_summary']:
-                #     self.save_to_csv(...)
-                
-                # ❌ DISATTIVATO - Cross Schema Privs CSV
-                # if oracle_data['cross_schema_privs']:
-                #     self.save_to_csv(...)
-                
-                # ❌ DISATTIVATO - External References CSV
-                # if oracle_data['external_references']:
-                #     self.save_to_csv(...)
             
             # === GENERAZIONE FILE EXCEL (ABILITATA CON MODIFICHE) ===
             if self.generate_excel:
                 dba_suffix = "_dba" if is_dba else "_nodba"
                 print(f"    📊 Creazione file Excel con suffisso: {dba_suffix}")
                 
-                # ❌ DISATTIVATO - Dependencies Excel
-                # if oracle_data['dependencies']:
-                #     self.save_to_excel(...)
-                
                 if oracle_data['db_links']:
                     self.save_to_excel(
                         oracle_data['db_links'],
-                        f"{connection_name}_dblinks{dba_suffix}_{schema_name}.xlsx",  # 🔧 SCHEMA INVECE DI USER
+                        f"{connection_name}_dblinks{dba_suffix}_{schema_name}.xlsx",
                         ['OWNER', 'DB_LINK', 'USERNAME', 'HOST'],
                         "DB_Links"
                     )
                 
-                # ❌ DISATTIVATO - Objects Excel
-                # if oracle_data['object_summary']:
-                #     self.save_to_excel(...)
-                
-                # ❌ DISATTIVATO - Cross Schema Privs Excel
-                # if oracle_data['cross_schema_privs']:
-                #     self.save_to_excel(...)
-                
-                # ❌ DISATTIVATO - External References Excel
-                # if oracle_data['external_references']:
-                #     self.save_to_excel(...)
-                
                 # === REPORT EXCEL COMPLETO ===
                 print("    📈 Creazione report Excel completo...")
-                self.save_combined_excel_report(oracle_data, connection_name, schema_name, is_dba)  # 🔧 SCHEMA INVECE DI USER
+                self.save_combined_excel_report(oracle_data, connection_name, schema_name, is_dba)
                 
                 # 🆕 === REPORT EXCEL DIMENSIONI con headers tablespace aggiornati ===
                 if self.analyze_sizes and 'size_data' in results:
                     print("    📏 Creazione report Excel dimensioni con query tablespace aggiornate...")
-                    self.save_sizes_excel_report(results['size_data'], connection_name, schema_name)  # 🔧 SCHEMA INVECE DI USER
+                    self.save_sizes_excel_report(results['size_data'], connection_name, schema_name)
             
             print("  ✅ File di output generati con successo")
             # ==========================================
@@ -2991,20 +2949,38 @@ DEBUG           0
                 mode_desc = f"schema: {target_schema}" if target_schema != 'auto' else ("DB completo" if ora2pg_results.get('dba_mode') else "solo schema")
                 print(f"  ✅ Analisi ora2pg completata ({mode_desc}) - Costo: {ora2pg_results.get('total_cost', 'N/A')}")
             
+            # ==========================================
+            # 🆕 NUOVA SEZIONE: SCRITTURA IMMEDIATA IN POSTGRESQL
+            # ==========================================
+            print(f"  💾 Scrittura immediata dati in PostgreSQL...")
+            self.save_to_postgresql_single(results, db_config)
+            # ==========================================
+            # FINE SEZIONE SCRITTURA POSTGRESQL
+            # ==========================================
+            
             print(f"  🎉 Analisi {connection_name} completata con successo")
+            
+            # 🆕 Aggiungi ai risultati summary per il report finale
+            db_key = f"{connection_name}_{db_config['user']}@{db_config['dsn']}"
+            self.summary_results[db_key] = results
             
         except Exception as e:
             error_msg = f"Errore durante l'analisi di {connection_name}: {str(e)}"
             print(f"  ❌ {error_msg}")
             results['error'] = error_msg
+            
+            # 🆕 Aggiungi anche gli errori al summary
+            db_key = f"{connection_name}_{db_config['user']}@{db_config['dsn']}"
+            self.summary_results[db_key] = results
+            
             import traceback
             traceback.print_exc()
             
         return results
 
     def run_analysis(self):
-        """Esegue l'analisi per tutti i database configurati"""
-        print(f"\n🚀 INIZIO ANALISI MULTI-DATABASE")
+        """🆕 Esegue l'analisi per tutti i database configurati - NUOVO FLUSSO SEQUENZIALE"""
+        print(f"\n🚀 INIZIO ANALISI MULTI-DATABASE - ELABORAZIONE SEQUENZIALE")
         print(f"📅 Data/ora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"📁 Output directory: {self.output_dir}")
         print(f"🔢 Database da analizzare: {len(self.oracle_connections)}")
@@ -3018,41 +2994,37 @@ DEBUG           0
         print(f"📊 Query tablespace: DBA (dettagli completi), NON-DBA (aggregato per tablespace)")
         print(f"🗃️  schema_name nelle tabelle ora2pg = schema configurato nel JSON")
         print(f"🔧 MODIFICHE: File Excel specifici disattivati, naming con schema invece di username")
+        print(f"🆕 NUOVO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB")
         
-        all_results = {}
         successful_analyses = 0
         failed_analyses = 0
         
-        # Analizza ogni database
+        # 🆕 ELABORAZIONE SEQUENZIALE: ANALIZZA E SALVA OGNI DATABASE IMMEDIATAMENTE
         for i, db_config in enumerate(self.oracle_connections, 1):
             print(f"\n📋 Elaborazione {i}/{len(self.oracle_connections)}")
             
             try:
-                results = self.analyze_database(db_config)
-                connection_name = db_config['connection_name']
-                db_key = f"{connection_name}_{db_config['user']}@{db_config.get('dsn', 'N/A')}"
-                all_results[db_key] = results
+                # 🆕 Analizza, genera file E salva in PostgreSQL immediatamente
+                results = self.analyze_database(db_config)  # Ora include anche il salvataggio PostgreSQL
                 
                 if results.get('error'):
                     failed_analyses += 1
+                    print(f"  ❌ Database {db_config['connection_name']} completato con errori")
                 else:
                     successful_analyses += 1
+                    print(f"  ✅ Database {db_config['connection_name']} completato con successo")
                     
             except Exception as e:
                 print(f"  ❌ Errore critico per {db_config['connection_name']}: {str(e)}")
                 failed_analyses += 1
         
-        # Salva report riassuntivo
-        print(f"\n📄 Generazione report riassuntivo...")
-        self.save_summary_report(all_results)
-        
-        # Salva tutto in PostgreSQL
-        print(f"\n💾 Salvataggio dati in PostgreSQL con query tablespace aggiornate...")
-        self.save_to_postgresql(all_results)
+        # 🆕 GENERA SOLO IL REPORT RIASSUNTIVO ALLA FINE (i dati sono già in PostgreSQL)
+        print(f"\n📄 Generazione report riassuntivo finale...")
+        self.save_summary_report()
         
         # Report finale
         print(f"\n{'='*70}")
-        print(f"🏁 ANALISI COMPLETATA!")
+        print(f"🏁 ANALISI SEQUENZIALE COMPLETATA!")
         print(f"{'='*70}")
         print(f"✅ Database analizzati con successo: {successful_analyses}")
         print(f"❌ Database con errori: {failed_analyses}")
@@ -3069,6 +3041,8 @@ DEBUG           0
         print(f"🗃️  schema_name nelle tabelle ora2pg = schema configurato nel JSON")
         print(f"🔧 Correzione: Usato 'owner' invece di 'table_schema' nelle query dba_tab_privs/all_tab_privs")
         print(f"🔧 MODIFICHE APPLICATE: File Excel specifici disattivati, naming con schema invece di username")
+        print(f"🆕 NUOVO FLUSSO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB")
+        print(f"⚡ VANTAGGI: Scrittura immediata, nessuna perdita dati in caso di interruzione")
         print(f"{'='*70}")
         
         # Lista file generati
@@ -3084,6 +3058,7 @@ def main():
     print("🎯 Oracle Multi-Database Dependency Analyzer")
     print("📋 Versione con query tablespace aggiornate, schema configurabile ora2pg, correzione query dba_tab_privs")
     print("🔧 MODIFICHE: File Excel specifici disattivati, naming con schema invece di username")
+    print("🆕 NUOVO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB")
     
     parser = argparse.ArgumentParser(description='Oracle Multi-Database Dependency Analyzer')
     parser.add_argument(
@@ -3116,7 +3091,7 @@ def main():
     
     try:
         # Inizializza analyzer
-        print(f"🔧 Inizializzazione analyzer...")
+        print(f"🔧 Inizializzazione analyzer con elaborazione sequenziale...")
         analyzer = OracleMultiDatabaseAnalyzer(args.config)
         
         # Override configurazioni da parametri command line
@@ -3136,7 +3111,7 @@ def main():
             analyzer.analyze_sizes = False
             print("📏 Analisi dimensioni disabilitata da parametro command line")
         
-        # Esegui analisi
+        # Esegui analisi con nuovo flusso sequenziale
         analyzer.run_analysis()
         
     except KeyboardInterrupt:
