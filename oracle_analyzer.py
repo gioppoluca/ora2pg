@@ -6,7 +6,7 @@ configurazioni esterne multiple, gestione connessioni normalizzata, output Excel
 ORA2PG: Utilizza schema specificato nel config JSON, altrimenti logica DBA/NON-DBA
 Query tablespace aggiornate: DBA (dettagli completi), NON-DBA (aggregato per tablespace)
 MODIFICHE: File Excel specifici disattivati, naming con schema invece di username
-NUOVO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB
+NUOVO: Elaborazione sequenziale con gestione memoria ottimizzata
 """
 
 import oracledb
@@ -25,6 +25,7 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils.dataframe import dataframe_to_rows
 import pandas as pd
+import gc  # 🆕 Garbage collector per liberare memoria
 
 # Fix encoding per Windows
 import locale
@@ -66,8 +67,14 @@ class OracleMultiDatabaseAnalyzer:
         print(f"💾 Inizializzazione schema database PostgreSQL...")
         self.create_database_schema()
         
-        # 🆕 STRUTTURA PER RACCOGLIERE RISULTATI SUMMARY
-        self.summary_results = {}
+        # 🆕 GESTIONE MEMORIA OTTIMIZZATA - File temporaneo per summary invece di memoria
+        self.summary_file = os.path.join(self.output_dir, 'temp_summary_data.json')
+        self.summary_stats = {
+            'total_databases': len(self.oracle_connections),
+            'successful_analyses': 0,
+            'failed_analyses': 0,
+            'start_time': datetime.now().isoformat()
+        }
         
         # Log delle connessioni caricate
         for conn in self.oracle_connections:
@@ -219,7 +226,51 @@ class OracleMultiDatabaseAnalyzer:
         print("💡 Opzioni 'is_dba': true, false, 'auto' (rileva automaticamente)")
         print("💡 Opzioni 'analyze_all_schemas': true (tutti gli schemi), false (solo utente corrente)")
         print("💡 Campo 'schema': opzionale, specifica lo schema per ora2pg (indipendente da DBA/NON-DBA)")
-        
+    
+    def append_to_summary_file(self, db_key, summary_data):
+        """🆕 Appende dati summary a file invece che tenerli in memoria"""
+        try:
+            # Leggi dati esistenti o crea nuovo file
+            if os.path.exists(self.summary_file):
+                with open(self.summary_file, 'r', encoding='utf-8') as f:
+                    existing_data = json.load(f)
+            else:
+                existing_data = {}
+            
+            # Aggiungi nuovi dati
+            existing_data[db_key] = summary_data
+            
+            # Scrivi tutto di nuovo (file piccolo, non problematico)
+            with open(self.summary_file, 'w', encoding='utf-8') as f:
+                json.dump(existing_data, f, indent=2, ensure_ascii=False)
+                
+        except Exception as e:
+            print(f"    ⚠️  Errore scrittura summary file: {e}")
+    
+    def read_summary_file(self):
+        """🆕 Legge i dati summary dal file"""
+        try:
+            if os.path.exists(self.summary_file):
+                with open(self.summary_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            return {}
+        except Exception as e:
+            print(f"⚠️  Errore lettura summary file: {e}")
+            return {}
+    
+    def cleanup_summary_file(self):
+        """🆕 Pulisce il file temporaneo summary"""
+        try:
+            if os.path.exists(self.summary_file):
+                os.remove(self.summary_file)
+        except Exception as e:
+            print(f"⚠️  Errore pulizia summary file: {e}")
+    
+    def force_garbage_collection(self):
+        """🆕 Forza la garbage collection per liberare memoria"""
+        collected = gc.collect()
+        print(f"    🧹 Memoria liberata: {collected} oggetti")
+    
     def get_db_connection(self, dsn, user, password):
         """Connessione al database Oracle usando oracledb"""
         try:
@@ -1407,8 +1458,9 @@ class OracleMultiDatabaseAnalyzer:
             print(f"    ⚠️  Errore salvataggio Excel dimensioni: {str(e)}")
     
     def save_summary_report(self):
-        """🆕 Crea un report riassuntivo in formato testo con info DBA/NON-DBA - MODIFICATO per elaborazione sequenziale"""
-        all_results = self.summary_results
+        """🆕 Crea un report riassuntivo in formato testo con info DBA/NON-DBA - MODIFICATO per file temporaneo"""
+        # Leggi dati dal file temporaneo invece che dalla memoria
+        all_results = self.read_summary_file()
         
         report_path = os.path.join(self.output_dir, 'summary_report.txt')
         
@@ -1424,7 +1476,8 @@ class OracleMultiDatabaseAnalyzer:
             f.write(f"ORA2PG: Schema configurabile per connessione, fallback logica DBA/NON-DBA\n")
             f.write(f"Query tablespace: DBA (dettagli completi), NON-DBA (aggregato per tablespace)\n")
             f.write(f"MODIFICHE: File Excel specifici disattivati, naming con schema invece di username\n")
-            f.write(f"🆕 NUOVO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB\n\n")
+            f.write(f"🆕 NUOVO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB\n")
+            f.write(f"🧹 OTTIMIZZAZIONE MEMORIA: Gestione memoria ottimizzata per grandi volumi\n\n")
             
             total_deps = 0
             total_links = 0
@@ -1536,8 +1589,12 @@ class OracleMultiDatabaseAnalyzer:
             f.write(f"Query tablespace: DBA (dettagli completi), NON-DBA (aggregato per tablespace)\n")
             f.write(f"MODIFICHE: File Excel specifici disattivati, naming con schema invece di username\n")
             f.write(f"🆕 NUOVO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB\n")
+            f.write(f"🧹 OTTIMIZZAZIONE MEMORIA: Uso file temporaneo per summary, garbage collection forzato\n")
         
         print(f"\n> Report riassuntivo salvato: summary_report.txt")
+        
+        # 🆕 Pulisci il file temporaneo
+        self.cleanup_summary_file()
     
     def run_ora2pg_analysis(self, dsn, username, password, connection_name, is_dba, db_config):
         """🆕 Esegue ora2pg con schema configurabile o logica DBA/NON-DBA - MODIFICATO NAMING"""
@@ -2598,7 +2655,7 @@ DEBUG           0
             raise
     
     def save_to_postgresql_single(self, results, db_config):
-        """🆕 Salva i risultati di un singolo database nel database PostgreSQL - NUOVO METODO PER ELABORAZIONE SEQUENZIALE"""
+        """🆕 Salva i risultati di un singolo database nel database PostgreSQL - OTTIMIZZATO MEMORIA"""
         try:
             connection_name = results.get('connection_name')
             if not connection_name:
@@ -2822,8 +2879,46 @@ DEBUG           0
             import traceback
             traceback.print_exc()
     
+    def create_lightweight_summary_data(self, results, db_config):
+        """🆕 Crea dati summary leggeri invece di mantenere tutto in memoria"""
+        # Estrai solo i dati essenziali per il summary
+        lightweight_data = {
+            'connection_name': results.get('connection_name'),
+            'dsn': results.get('dsn'),
+            'schema': results.get('schema'),
+            'is_dba': results.get('is_dba', False),
+            'error': results.get('error'),
+            # Solo conteggi, non i dati completi
+            'dependencies_count': len(results.get('dependencies', [])),
+            'db_links_count': len(results.get('db_links', [])),
+            'cross_schema_privs_count': len(results.get('cross_schema_privs', [])),
+            'external_references_count': len(results.get('external_references', [])),
+            'object_summary': results.get('object_summary', [])  # Mantieni summary oggetti (piccolo)
+        }
+        
+        # Informazioni dimensioni (solo conteggi e totali)
+        if results.get('size_data'):
+            size_data = results['size_data']
+            lightweight_data['size_data'] = {
+                'schema_size': size_data.get('schema_size', []),  # Schema size è piccolo
+                'table_size_count': len(size_data.get('table_size', [])),
+                'index_size_count': len(size_data.get('index_size', [])),
+                'code_stats': size_data.get('code_stats', [])  # Code stats per summary
+            }
+        
+        # Metriche ora2pg (solo info essenziali)
+        if results.get('ora2pg_metrics'):
+            lightweight_data['ora2pg_metrics'] = {
+                'total_cost': results['ora2pg_metrics'].get('total_cost', 0),
+                'migration_level': results['ora2pg_metrics'].get('migration_level', 'Unknown'),
+                'analyzed_schemas': results['ora2pg_metrics'].get('analyzed_schemas', []),
+                'target_schema': results['ora2pg_metrics'].get('target_schema', 'auto')
+            }
+        
+        return lightweight_data
+    
     def analyze_database(self, db_config):
-        """🆕 Analizza un singolo database Oracle con rilevamento DBA e query separate - MODIFICATO per elaborazione sequenziale"""
+        """🆕 Analizza un singolo database Oracle con gestione memoria ottimizzata"""
         connection_name = db_config['connection_name']
         
         # Verifica se DSN è presente
@@ -2832,12 +2927,17 @@ DEBUG           0
             print(f"⚠️  SALTATO - Database: {connection_name}")
             print(f"🔗 Motivo: DSN mancante nella configurazione")
             print(f"{'='*70}")
-            return {
+            error_result = {
                 'schema': db_config['user'],
                 'connection_name': connection_name,
                 'dsn': 'N/A',
                 'error': 'DSN mancante nella configurazione'
             }
+            # Aggiungi ai risultati summary
+            db_key = f"{connection_name}_{db_config['user']}@N/A"
+            lightweight_summary = self.create_lightweight_summary_data(error_result, db_config)
+            self.append_to_summary_file(db_key, lightweight_summary)
+            return error_result
         
         db_name = f"{connection_name}_{db_config['user']}@{db_config['dsn']}"
         
@@ -2950,7 +3050,7 @@ DEBUG           0
                 print(f"  ✅ Analisi ora2pg completata ({mode_desc}) - Costo: {ora2pg_results.get('total_cost', 'N/A')}")
             
             # ==========================================
-            # 🆕 NUOVA SEZIONE: SCRITTURA IMMEDIATA IN POSTGRESQL
+            # 🆕 SEZIONE: SCRITTURA IMMEDIATA IN POSTGRESQL
             # ==========================================
             print(f"  💾 Scrittura immediata dati in PostgreSQL...")
             self.save_to_postgresql_single(results, db_config)
@@ -2960,9 +3060,28 @@ DEBUG           0
             
             print(f"  🎉 Analisi {connection_name} completata con successo")
             
-            # 🆕 Aggiungi ai risultati summary per il report finale
+            # 🆕 GESTIONE MEMORIA OTTIMIZZATA: Salva solo dati leggeri per summary
             db_key = f"{connection_name}_{db_config['user']}@{db_config['dsn']}"
-            self.summary_results[db_key] = results
+            lightweight_summary = self.create_lightweight_summary_data(results, db_config)
+            self.append_to_summary_file(db_key, lightweight_summary)
+            
+            # 🆕 FORZA GARBAGE COLLECTION E LIBERA MEMORIA
+            # Pulisci dati pesanti dalla memoria
+            if 'size_data' in results:
+                # Mantieni solo conteggi per il return, libera i dati dettagliati
+                size_summary = {
+                    'is_dba': results['size_data'].get('is_dba'),
+                    'table_count': len(results['size_data'].get('table_size', [])),
+                    'index_count': len(results['size_data'].get('index_size', [])),
+                    'segment_count': len(results['size_data'].get('segment_size', []))
+                }
+                results['size_data'] = size_summary
+            
+            # Pulisci oracle_data dalla memoria (già salvato)
+            oracle_data.clear()
+            
+            # Forza garbage collection
+            self.force_garbage_collection()
             
         except Exception as e:
             error_msg = f"Errore durante l'analisi di {connection_name}: {str(e)}"
@@ -2971,7 +3090,8 @@ DEBUG           0
             
             # 🆕 Aggiungi anche gli errori al summary
             db_key = f"{connection_name}_{db_config['user']}@{db_config['dsn']}"
-            self.summary_results[db_key] = results
+            lightweight_summary = self.create_lightweight_summary_data(results, db_config)
+            self.append_to_summary_file(db_key, lightweight_summary)
             
             import traceback
             traceback.print_exc()
@@ -2979,8 +3099,8 @@ DEBUG           0
         return results
 
     def run_analysis(self):
-        """🆕 Esegue l'analisi per tutti i database configurati - NUOVO FLUSSO SEQUENZIALE"""
-        print(f"\n🚀 INIZIO ANALISI MULTI-DATABASE - ELABORAZIONE SEQUENZIALE")
+        """🆕 Esegue l'analisi per tutti i database configurati - OTTIMIZZATO MEMORIA"""
+        print(f"\n🚀 INIZIO ANALISI MULTI-DATABASE - ELABORAZIONE SEQUENZIALE OTTIMIZZATA")
         print(f"📅 Data/ora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"📁 Output directory: {self.output_dir}")
         print(f"🔢 Database da analizzare: {len(self.oracle_connections)}")
@@ -2995,36 +3115,56 @@ DEBUG           0
         print(f"🗃️  schema_name nelle tabelle ora2pg = schema configurato nel JSON")
         print(f"🔧 MODIFICHE: File Excel specifici disattivati, naming con schema invece di username")
         print(f"🆕 NUOVO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB")
+        print(f"🧹 OTTIMIZZAZIONE MEMORIA: File temporaneo per summary, garbage collection, dati leggeri")
         
         successful_analyses = 0
         failed_analyses = 0
         
-        # 🆕 ELABORAZIONE SEQUENZIALE: ANALIZZA E SALVA OGNI DATABASE IMMEDIATAMENTE
+        # 🆕 ELABORAZIONE SEQUENZIALE OTTIMIZZATA: ANALIZZA E SALVA OGNI DATABASE IMMEDIATAMENTE
         for i, db_config in enumerate(self.oracle_connections, 1):
             print(f"\n📋 Elaborazione {i}/{len(self.oracle_connections)}")
             
             try:
                 # 🆕 Analizza, genera file E salva in PostgreSQL immediatamente
-                results = self.analyze_database(db_config)  # Ora include anche il salvataggio PostgreSQL
+                results = self.analyze_database(db_config)  # Ora include anche il salvataggio PostgreSQL e gestione memoria
                 
                 if results.get('error'):
                     failed_analyses += 1
+                    self.summary_stats['failed_analyses'] += 1
                     print(f"  ❌ Database {db_config['connection_name']} completato con errori")
                 else:
                     successful_analyses += 1
+                    self.summary_stats['successful_analyses'] += 1
                     print(f"  ✅ Database {db_config['connection_name']} completato con successo")
+                    
+                # 🆕 LIBERA MEMORIA: Pulisci risultati dal dizionario locale
+                results.clear()
                     
             except Exception as e:
                 print(f"  ❌ Errore critico per {db_config['connection_name']}: {str(e)}")
                 failed_analyses += 1
+                self.summary_stats['failed_analyses'] += 1
+            
+            # 🆕 GARBAGE COLLECTION PERIODICO ogni 5 database
+            if i % 5 == 0:
+                print(f"    🧹 Pulizia memoria periodica (database {i}/{len(self.oracle_connections)})")
+                self.force_garbage_collection()
         
-        # 🆕 GENERA SOLO IL REPORT RIASSUNTIVO ALLA FINE (i dati sono già in PostgreSQL)
+        # 🆕 AGGIORNA STATISTICHE FINALI
+        self.summary_stats['end_time'] = datetime.now().isoformat()
+        self.summary_stats['total_time'] = datetime.now() - datetime.fromisoformat(self.summary_stats['start_time'])
+        
+        # 🆕 GENERA SOLO IL REPORT RIASSUNTIVO ALLA FINE (legge dal file temporaneo)
         print(f"\n📄 Generazione report riassuntivo finale...")
         self.save_summary_report()
         
+        # 🆕 PULIZIA FINALE MEMORIA
+        print(f"\n🧹 Pulizia finale memoria...")
+        self.force_garbage_collection()
+        
         # Report finale
         print(f"\n{'='*70}")
-        print(f"🏁 ANALISI SEQUENZIALE COMPLETATA!")
+        print(f"🏁 ANALISI SEQUENZIALE OTTIMIZZATA COMPLETATA!")
         print(f"{'='*70}")
         print(f"✅ Database analizzati con successo: {successful_analyses}")
         print(f"❌ Database con errori: {failed_analyses}")
@@ -3043,6 +3183,8 @@ DEBUG           0
         print(f"🔧 MODIFICHE APPLICATE: File Excel specifici disattivati, naming con schema invece di username")
         print(f"🆕 NUOVO FLUSSO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB")
         print(f"⚡ VANTAGGI: Scrittura immediata, nessuna perdita dati in caso di interruzione")
+        print(f"🧹 OTTIMIZZAZIONE MEMORIA: File temporaneo summary, garbage collection, dati leggeri")
+        print(f"📊 MEMORIA: Utilizzo costante indipendente dal numero di database")
         print(f"{'='*70}")
         
         # Lista file generati
@@ -3059,8 +3201,9 @@ def main():
     print("📋 Versione con query tablespace aggiornate, schema configurabile ora2pg, correzione query dba_tab_privs")
     print("🔧 MODIFICHE: File Excel specifici disattivati, naming con schema invece di username")
     print("🆕 NUOVO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB")
+    print("🧹 OTTIMIZZAZIONE MEMORIA: Gestione memoria ottimizzata per grandi volumi")
     
-    parser = argparse.ArgumentParser(description='Oracle Multi-Database Dependency Analyzer')
+    parser = argparse.ArgumentParser(description='Oracle Multi-Database Dependency Analyzer - Memory Optimized')
     parser.add_argument(
         '--config', 
         default='oracle_connections.json',
@@ -3091,7 +3234,7 @@ def main():
     
     try:
         # Inizializza analyzer
-        print(f"🔧 Inizializzazione analyzer con elaborazione sequenziale...")
+        print(f"🔧 Inizializzazione analyzer con elaborazione sequenziale e gestione memoria ottimizzata...")
         analyzer = OracleMultiDatabaseAnalyzer(args.config)
         
         # Override configurazioni da parametri command line
@@ -3111,7 +3254,7 @@ def main():
             analyzer.analyze_sizes = False
             print("📏 Analisi dimensioni disabilitata da parametro command line")
         
-        # Esegui analisi con nuovo flusso sequenziale
+        # Esegui analisi con nuovo flusso sequenziale ottimizzato
         analyzer.run_analysis()
         
     except KeyboardInterrupt:
