@@ -7,6 +7,7 @@ ORA2PG: Utilizza schema specificato nel config JSON, altrimenti logica DBA/NON-D
 Query tablespace aggiornate: DBA (dettagli completi), NON-DBA (aggregato per tablespace)
 MODIFICHE: File Excel specifici disattivati, naming con schema invece di username
 NUOVO: Elaborazione sequenziale con gestione memoria ottimizzata
+NUOVA FUNZIONALITÀ: Conversione script database con ora2pg (TABLE, VIEW, SEQUENCE)
 """
 
 import oracledb
@@ -59,6 +60,9 @@ class OracleMultiDatabaseAnalyzer:
         # 🆕 CONFIGURAZIONE ANALISI DIMENSIONI
         self.analyze_sizes = self.config.get('analyze_sizes', True)  # Default abilitato
         
+        # 🆕 CONFIGURAZIONE CONVERSIONE SCRIPT
+        self.generate_conversion_scripts = self.config.get('generate_conversion_scripts', False)  # Default disabilitato
+        
         # 🆕 CONFIGURAZIONE OUTPUT ORA2PG
         # Opzioni: 'html_only', 'html_and_txt'
         self.ora2pg_output_mode = self.config.get('ora2pg_output_mode', 'html_and_txt')
@@ -80,6 +84,12 @@ class OracleMultiDatabaseAnalyzer:
         for conn in self.oracle_connections:
             schema_info = f" -> schema: {conn['schema']}" if 'schema' in conn else " -> schema: auto (DBA/NON-DBA)"
             print(f"  - {conn['connection_name']}: {conn['user']}@{conn.get('dsn', 'N/A')}{schema_info}")
+        
+        # 🆕 Log configurazione conversione
+        if self.generate_conversion_scripts:
+            print(f"🔧 Conversione script abilitata: TABLE, SEQUENCE")
+        else:
+            print(f"🔧 Conversione script disabilitata")
     
     def setup_oracle_client(self):
         """Configura Oracle Client con path automatico o configurabile"""
@@ -165,6 +175,11 @@ class OracleMultiDatabaseAnalyzer:
                 # DSN non è obbligatorio se non specificato
                 if 'dsn' not in conn:
                     print(f"⚠️  Connessione {conn['connection_name']}: DSN mancante, verrà saltata")
+                
+                # 🆕 Validazione schema per conversione
+                if config.get('generate_conversion_scripts', False):
+                    if 'schema' not in conn or not conn['schema']:
+                        print(f"⚠️  Connessione {conn['connection_name']}: campo 'schema' mancante o vuoto, conversione script saltata")
             
             print("✅ Configurazione validata con successo")
             return config
@@ -215,7 +230,8 @@ class OracleMultiDatabaseAnalyzer:
             ],
             "oracle_client_path": "C:/instantclient_23_7/instantclient_23_7",
             "ora2pg_output_mode": "html_and_txt",
-            "analyze_sizes": True
+            "analyze_sizes": True,
+            "generate_conversion_scripts": True
         }
 
         with open(self.config_file, 'w', encoding='utf-8') as f:
@@ -225,7 +241,8 @@ class OracleMultiDatabaseAnalyzer:
         print("✏️  Modifica il file con le tue configurazioni e riesegui lo script.")
         print("💡 Opzioni 'is_dba': true, false, 'auto' (rileva automaticamente)")
         print("💡 Opzioni 'analyze_all_schemas': true (tutti gli schemi), false (solo utente corrente)")
-        print("💡 Campo 'schema': opzionale, specifica lo schema per ora2pg (indipendente da DBA/NON-DBA)")
+        print("💡 Campo 'schema': obbligatorio per conversione script, specifica lo schema per ora2pg")
+        print("💡 Campo 'generate_conversion_scripts': true/false - abilita conversione script database")
     
     def append_to_summary_file(self, db_key, summary_data):
         """🆕 Appende dati summary a file invece che tenerli in memoria"""
@@ -1472,11 +1489,13 @@ class OracleMultiDatabaseAnalyzer:
             f.write(f"Formato output: {'Excel' if self.generate_excel else 'CSV' if self.generate_csv else 'Solo Database'}\n")
             f.write(f"Output ora2pg: {self.ora2pg_output_mode}\n")
             f.write(f"Analisi dimensioni: {'Abilitata' if self.analyze_sizes else 'Disabilitata'}\n")
-            f.write(f"Prefissi tabelle: pdt_dep_dba_/pdt_dep_nodba_ (dipendenze), pdt_sizes_dba_/pdt_sizes_nodba_ (dimensioni), ptd_ (ora2pg)\n")
+            f.write(f"Conversione script: {'Abilitata' if self.generate_conversion_scripts else 'Disabilitata'}\n")
+            f.write(f"Prefissi tabelle: pdt_dep_dba_/pdt_dep_nodba_ (dipendenze), pdt_sizes_dba_/pdt_sizes_nodba_ (dimensioni), ptd_ (ora2pg), pdt_db_conversion_script (conversione)\n")
             f.write(f"ORA2PG: Schema configurabile per connessione, fallback logica DBA/NON-DBA\n")
             f.write(f"Query tablespace: DBA (dettagli completi), NON-DBA (aggregato per tablespace)\n")
             f.write(f"MODIFICHE: File Excel specifici disattivati, naming con schema invece di username\n")
             f.write(f"🆕 NUOVO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB\n")
+            f.write(f"🆕 CONVERSIONE: Script database (TABLE, SEQUENCE) tramite ora2pg\n")
             f.write(f"🧹 OTTIMIZZAZIONE MEMORIA: Gestione memoria ottimizzata per grandi volumi\n\n")
             
             total_deps = 0
@@ -1489,6 +1508,7 @@ class OracleMultiDatabaseAnalyzer:
             total_indexes = 0
             total_dba_users = 0
             total_non_dba_users = 0
+            total_conversions = 0
             
             for db_key, results in all_results.items():
                 f.write(f"\nDatabase: {db_key}\n")
@@ -1513,10 +1533,10 @@ class OracleMultiDatabaseAnalyzer:
                     f.write(f"  - {obj[1]}: {obj[2]}\n")
                 
                 # Conteggi dipendenze
-                deps = len(results.get('dependencies', []))
-                links = len(results.get('db_links', []))
-                cross = len(results.get('cross_schema_privs', []))
-                ext_refs = len(results.get('external_references', []))
+                deps = results.get('dependencies_count', 0)
+                links = results.get('db_links_count', 0)
+                cross = results.get('cross_schema_privs_count', 0)
+                ext_refs = results.get('external_references_count', 0)
                 
                 f.write(f"\nDipendenze (modalità {'DBA' if is_dba else 'NON-DBA'}):\n")
                 f.write(f"  - Dipendenze trovate: {deps}\n")
@@ -1534,8 +1554,8 @@ class OracleMultiDatabaseAnalyzer:
                             f.write(f"  - Schema {schema[0]}: {schema[1]} GB\n")
                             total_schema_size_gb += float(schema[1]) if schema[1] else 0
                     
-                    tables_count = len(size_data.get('table_size', []))
-                    indexes_count = len(size_data.get('index_size', []))
+                    tables_count = size_data.get('table_size_count', 0)
+                    indexes_count = size_data.get('index_size_count', 0)
                     f.write(f"  - Tabelle: {tables_count}\n")
                     f.write(f"  - Indici: {indexes_count}\n")
                     total_tables += tables_count
@@ -1563,6 +1583,16 @@ class OracleMultiDatabaseAnalyzer:
                         f.write(f"  - Schemi analizzati: {', '.join(analyzed_schemas)}\n")
                     total_cost += float(cost) if cost else 0
                 
+                # 🆕 Info conversione script
+                if results.get('conversion_script_generated'):
+                    f.write(f"\nConversione script:\n")
+                    f.write(f"  - Script generato: SÌ\n")
+                    f.write(f"  - Ha errori: {'SÌ' if results.get('conversion_has_errors') else 'NO'}\n")
+                    total_conversions += 1
+                elif self.generate_conversion_scripts:
+                    f.write(f"\nConversione script:\n")
+                    f.write(f"  - Script generato: NO (schema mancante o errore)\n")
+                
                 total_deps += deps
                 total_links += links
                 total_cross_schema += cross
@@ -1583,12 +1613,16 @@ class OracleMultiDatabaseAnalyzer:
                 f.write(f"Tabelle totali: {total_tables}\n")
                 f.write(f"Indici totali: {total_indexes}\n")
             
+            if self.generate_conversion_scripts:
+                f.write(f"Script conversione generati: {total_conversions}\n")
+            
             f.write(f"Utenti DBA: {total_dba_users}\n")
             f.write(f"Utenti NON-DBA: {total_non_dba_users}\n")
             f.write(f"ORA2PG: Schema configurabile per connessione, fallback logica DBA/NON-DBA\n")
             f.write(f"Query tablespace: DBA (dettagli completi), NON-DBA (aggregato per tablespace)\n")
             f.write(f"MODIFICHE: File Excel specifici disattivati, naming con schema invece di username\n")
             f.write(f"🆕 NUOVO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB\n")
+            f.write(f"🆕 CONVERSIONE: Script database (TABLE, SEQUENCE) tramite ora2pg\n")
             f.write(f"🧹 OTTIMIZZAZIONE MEMORIA: Uso file temporaneo per summary, garbage collection forzato\n")
         
         print(f"\n> Report riassuntivo salvato: summary_report.txt")
@@ -2035,8 +2069,300 @@ DEBUG           0
             print(f"      > Estratte {len(procedures)} procedure/funzioni dai dettagli")
         return procedures
     
+    def run_ora2pg_conversion(self, dsn, username, password, connection_name, db_config):
+        """🆕 Esegue ora2pg per la conversione degli script database (TABLE, SEQUENCE) - CORRETTO"""
+        # Verifica che lo schema sia configurato
+        if 'schema' not in db_config or not db_config['schema']:
+            print(f"    ⚠️  Schema mancante per {connection_name}, conversione saltata")
+            return None
+        
+        target_schema = db_config['schema']
+        print(f"    🔧 Conversione script per schema: {target_schema}")
+        
+        # Parsing DSN per ora2pg
+        import re
+        dsn_pattern = r'([^:]+):(\d+)/(.+)'
+        match = re.match(dsn_pattern, dsn)
+        
+        if match:
+            host = match.group(1)
+            port = match.group(2)
+            service = match.group(3)
+            oracle_dsn = f"//{host}:{port}/{service}"
+        else:
+            oracle_dsn = dsn
+        
+        # 🔧 CORREZIONE: Nome file di output senza estensione nella config
+        output_filename = f"{connection_name}_conversion_script_{target_schema}"
+        
+        # Crea configurazione ora2pg per conversione
+        ora2pg_conv_conf_content = f"""# Ora2pg configuration file for database conversion
+# Connection: {connection_name} - Schema: {target_schema}
+# Conversion types: TABLE, SEQUENCE
+
+# Oracle database connection
+ORACLE_DSN      dbi:Oracle:{oracle_dsn}
+ORACLE_USER     {username}
+ORACLE_PWD      {password}
+
+# PostgreSQL target version
+PG_VERSION      14
+
+# Output settings
+OUTPUT_DIR      {self.output_dir}
+TYPE            TABLE,SEQUENCE
+STOP_ON_ERROR   0
+OUTPUT          {output_filename}.sql
+
+# Schema to convert
+SCHEMA          {target_schema}
+
+# Character set
+NLS_LANG        AMERICAN_AMERICA.AL32UTF8
+BINMODE         utf8
+
+# Conversion settings
+PLSQL_PGSQL     1
+ESTIMATE_COST   0
+EXPORT_SCHEMA   0
+CREATE_SCHEMA   1
+DISABLE_COMMENT 0
+DISABLE_UNLOGGED 0
+FILE_PER_TABLE  0
+FILE_PER_CONSTRAINT 0
+FILE_PER_INDEX 0
+FILE_PER_FKEYS 0
+
+# Allow data types conversion
+ALLOW_CODE_BREAK 1
+COMMENT_ORIGINAL_SQL 1
+
+# Debug per vedere cosa genera
+DEBUG           1
+"""
+    
+        # File configurazione conversione
+        conv_conf_file = os.path.join(self.output_dir, f'{connection_name}_conversion_{target_schema}.conf')
+        with open(conv_conf_file, 'w', encoding='utf-8') as f:
+            f.write(ora2pg_conv_conf_content)
+        
+        print(f"    > Config conversione creato: {connection_name}_conversion_{target_schema}.conf")
+        
+        # 🔧 CORREZIONE: Possibili file di output che ora2pg può generare
+        possible_output_files = [
+            os.path.join(self.output_dir, f'{output_filename}.sql'),
+            os.path.join(self.output_dir, f'{output_filename}_TABLE.sql'),
+            os.path.join(self.output_dir, f'{output_filename}_VIEW.sql'),
+            os.path.join(self.output_dir, f'{output_filename}_SEQUENCE.sql'),
+            os.path.join(self.output_dir, f'{target_schema}.sql'),
+            os.path.join(self.output_dir, f'output.sql')
+        ]
+        
+        # Esegui ora2pg per conversione
+        try:
+            if sys.platform == 'win32':
+                cmd = f'ora2pg -c "{conv_conf_file}"'
+            else:
+                cmd = f'ora2pg -c "{conv_conf_file}"'
+            
+            print(f"    🔄 Esecuzione ora2pg conversione...")
+            print(f"    📁 Directory output: {self.output_dir}")
+            
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+            
+            print(f"    📊 Return code: {result.returncode}")
+            if result.stdout:
+                print(f"    📄 STDOUT: {result.stdout[:500]}...")
+            if result.stderr:
+                print(f"    ⚠️  STDERR: {result.stderr[:500]}...")
+            
+            # 🔧 CORREZIONE: Cerca tutti i file generati
+            generated_files = []
+            all_files_in_output = os.listdir(self.output_dir)
+            
+            print(f"    📂 File nella directory output:")
+            for file in all_files_in_output:
+                print(f"      - {file}")
+                if file.endswith('.sql') and (target_schema.lower() in file.lower() or connection_name.lower() in file.lower()):
+                    generated_files.append(os.path.join(self.output_dir, file))
+            
+            # Se non troviamo file specifici, cerca tutti i .sql recenti
+            if not generated_files:
+                import time
+                current_time = time.time()
+                for file in all_files_in_output:
+                    if file.endswith('.sql'):
+                        file_path = os.path.join(self.output_dir, file)
+                        file_time = os.path.getmtime(file_path)
+                        # File creato negli ultimi 60 secondi
+                        if current_time - file_time < 60:
+                            generated_files.append(file_path)
+                            print(f"    📄 File SQL recente trovato: {file}")
+            
+            if generated_files:
+                print(f"    ✅ Conversione completata - {len(generated_files)} file generati")
+                
+                # Combina tutti i file generati in un unico script
+                combined_script = f"""-- Oracle to PostgreSQL Conversion Script
+    -- Connection: {connection_name}
+    -- Schema: {target_schema}
+    -- Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+    -- Types: TABLE, VIEW, SEQUENCE
+
+    """
+                
+                for file_path in generated_files:
+                    file_name = os.path.basename(file_path)
+                    print(f"    📄 Leggendo file: {file_name}")
+                    
+                    try:
+                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                        
+                        if content.strip():
+                            combined_script += f"""
+    -- ==========================================
+    -- {file_name}
+    -- ==========================================
+    {content}
+
+    """
+                    except Exception as e:
+                        print(f"    ⚠️  Errore lettura {file_name}: {str(e)}")
+                
+                # Salva lo script combinato
+                final_script_file = os.path.join(self.output_dir, f'{connection_name}_conversion_script_{target_schema}.sql')
+                with open(final_script_file, 'w', encoding='utf-8') as f:
+                    f.write(combined_script)
+                
+                print(f"    > Script combinato salvato: {os.path.basename(final_script_file)}")
+                print(f"    > Dimensione script: {len(combined_script)} caratteri")
+                
+                # Verifica se ci sono errori nel script
+                has_errors = self._check_script_for_errors(combined_script)
+                
+                if has_errors:
+                    print(f"    ⚠️  Script contiene errori, sarà commentato")
+                    combined_script = self._comment_problematic_sections(combined_script)
+                
+                return {
+                    'script_content': combined_script,
+                    'has_errors': has_errors,
+                    'error_details': result.stderr if result.stderr else None,
+                    'script_file': final_script_file,
+                    'generated_files': generated_files
+                }
+            else:
+                print(f"    ❌ Nessun file SQL generato")
+                
+                # Prova a salvare l'output di debug se disponibile
+                if result.stdout:
+                    debug_file = os.path.join(self.output_dir, f'{connection_name}_conversion_debug_{target_schema}.txt')
+                    with open(debug_file, 'w', encoding='utf-8') as f:
+                        f.write(f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}")
+                    print(f"    > Debug salvato: {os.path.basename(debug_file)}")
+                
+                return None
+                
+        except Exception as e:
+            print(f"    ❌ Errore esecuzione ora2pg conversione: {str(e)}")
+            return None
+
+    def _check_script_for_errors(self, script_content):
+        """🆕 Verifica se lo script contiene errori comuni - MIGLIORATO"""
+        error_patterns = [
+            r'ERROR:',
+            r'WARNING:',
+            r'UNKNOWN',
+            r'NOT\s+SUPPORTED',
+            r'FIXME',
+            r'TODO',
+            r'CONVERSION\s+ERROR',
+            r'FAILED\s+TO\s+CONVERT',
+            r'COULD\s+NOT\s+CONVERT',
+            r'UNSUPPORTED\s+TYPE',
+            r'CANNOT\s+CONVERT'
+        ]
+        
+        error_count = 0
+        for pattern in error_patterns:
+            matches = re.findall(pattern, script_content, re.IGNORECASE)
+            if matches:
+                error_count += len(matches)
+                print(f"    ⚠️  Trovati {len(matches)} errori tipo: {pattern}")
+        
+        # Considera errore anche se lo script è troppo corto (solo commenti)
+        lines = [line.strip() for line in script_content.split('\n') if line.strip()]
+        sql_lines = [line for line in lines if not line.startswith('--') and not line.startswith('/*')]
+        
+        if len(sql_lines) < 5:
+            print(f"    ⚠️  Script troppo corto: {len(sql_lines)} righe SQL")
+            return True
+        
+        return error_count > 0
+
+    def _comment_problematic_sections(self, script_content, force=False):
+        """🆕 Commenta le sezioni problematiche dello script - MIGLIORATO"""
+        lines = script_content.split('\n')
+        commented_lines = []
+        
+        error_patterns = [
+            r'ERROR:',
+            r'WARNING:',
+            r'UNKNOWN',
+            r'NOT\s+SUPPORTED',
+            r'FIXME',
+            r'TODO',
+            r'CONVERSION\s+ERROR',
+            r'FAILED\s+TO\s+CONVERT',
+            r'COULD\s+NOT\s+CONVERT',
+            r'UNSUPPORTED\s+TYPE',
+            r'CANNOT\s+CONVERT'
+        ]
+        
+        # Header di warning
+        commented_lines.append('/*')
+        commented_lines.append(' * ==========================================')
+        commented_lines.append(' * ORACLE TO POSTGRESQL CONVERSION SCRIPT')
+        commented_lines.append(' * ==========================================')
+        if force:
+            commented_lines.append(' * ATTENZIONE: Questo script è stato generato con errori.')
+        commented_lines.append(' * Le sezioni problematiche sono state commentate.')
+        commented_lines.append(' * Rivedere attentamente prima dell\'esecuzione.')
+        commented_lines.append(' * ==========================================')
+        commented_lines.append(' */')
+        commented_lines.append('')
+        
+        in_error_block = False
+        
+        for line in lines:
+            line_has_error = False
+            
+            # Verifica se la linea contiene errori
+            for pattern in error_patterns:
+                if re.search(pattern, line, re.IGNORECASE):
+                    line_has_error = True
+                    break
+            
+            if line_has_error:
+                if not in_error_block:
+                    commented_lines.append('')
+                    commented_lines.append('/*')
+                    commented_lines.append(' * ERRORE DI CONVERSIONE - SEZIONE COMMENTATA')
+                    commented_lines.append(' * Controllare manualmente questa sezione')
+                    commented_lines.append(' */')
+                    in_error_block = True
+                commented_lines.append(f'-- {line}')
+            else:
+                if in_error_block:
+                    commented_lines.append('')
+                    in_error_block = False
+                commented_lines.append(line)
+        
+        return '\n'.join(commented_lines)
+    
     def create_database_schema(self):
-        """🆕 Crea lo schema del database con prefissi pdt_dep_dba_/pdt_dep_nodba_, pdt_sizes_dba_/pdt_sizes_nodba_ e FK"""
+        """🆕 Crea lo schema del database con prefissi pdt_dep_dba_/pdt_dep_nodba_, pdt_sizes_dba_/pdt_sizes_nodba_ e FK + tabella conversione"""
         try:
             conn = psycopg2.connect(**self.pg_config)
             cursor = conn.cursor()
@@ -2061,7 +2387,19 @@ DEBUG           0
                 )
             """)
             
-            
+            # 🆕 NUOVA TABELLA PER SCRIPT DI CONVERSIONE
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS oracle_migration.pdt_db_conversion_script (
+                    id SERIAL PRIMARY KEY,
+                    connection_id INTEGER REFERENCES oracle_migration.pdt_connections(id) ON DELETE CASCADE,
+                    analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    schema_name TEXT NOT NULL,
+                    conversion_script TEXT NOT NULL,
+                    has_errors BOOLEAN DEFAULT FALSE,
+                    error_details TEXT,
+                    script_file_path TEXT
+                )
+            """)
             
             # 🆕 TABELLE DIPENDENZE DBA CON PREFISSO pdt_dep_dba_
             cursor.execute("""
@@ -2475,6 +2813,10 @@ DEBUG           0
             """)
             
             # 🆕 CREA INDICI CON NUOVI PREFISSI
+            # 🆕 Indice per tabella conversione script
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_db_conversion_script_connection_id ON oracle_migration.pdt_db_conversion_script(connection_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_db_conversion_script_schema_name ON oracle_migration.pdt_db_conversion_script(schema_name)")
+            
             # Indici dipendenze DBA pdt_dep_dba_
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_dep_dba_dependencies_connection_id ON oracle_migration.pdt_dep_dba_dependencies(connection_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_pdt_dep_dba_db_links_connection_id ON oracle_migration.pdt_dep_dba_db_links(connection_id)")
@@ -2515,7 +2857,7 @@ DEBUG           0
             conn.commit()
             cursor.close()
             conn.close()
-            print("  ✅ Schema database con prefissi completi e query tablespace aggiornate creato/aggiornato con successo")
+            print("  ✅ Schema database con prefissi completi, query tablespace aggiornate e tabella conversione script creato/aggiornato con successo")
             
         except Exception as e:
             print(f"  ❌ Errore creazione schema database: {e}")
@@ -2586,7 +2928,7 @@ DEBUG           0
             raise
     
     def cleanup_existing_data(self, connection_id, is_dba):
-        """🆕 Cancella i dati esistenti per una connessione dalle tabelle con prefissi DBA/NON-DBA"""
+        """🆕 Cancella i dati esistenti per una connessione dalle tabelle con prefissi DBA/NON-DBA + conversione"""
         try:
             conn = psycopg2.connect(**self.pg_config)
             cursor = conn.cursor()
@@ -2595,7 +2937,9 @@ DEBUG           0
             tables_to_clean = [
                 # Tabelle ora2pg (ptd_) - sempre
                 'ptd_ora2pg_object_summary',
-                'ptd_ora2pg_estimates'
+                'ptd_ora2pg_estimates',
+                # 🆕 Tabella conversione script
+                'pdt_db_conversion_script'
             ]
             
             # Aggiungi tabelle dipendenze in base al tipo utente
@@ -2654,8 +2998,37 @@ DEBUG           0
             print(f"    ❌ Errore pulizia dati esistenti: {e}")
             raise
     
+    def save_conversion_script_to_postgresql(self, connection_id, conversion_result, target_schema):
+        """🆕 Salva lo script di conversione nel database PostgreSQL"""
+        try:
+            conn = psycopg2.connect(**self.pg_config)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                INSERT INTO oracle_migration.pdt_db_conversion_script 
+                (connection_id, schema_name, conversion_script, has_errors, error_details, script_file_path)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (
+                connection_id,
+                target_schema,
+                conversion_result['script_content'],
+                conversion_result['has_errors'],
+                conversion_result.get('error_details'),
+                conversion_result.get('script_file')
+            ))
+            
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            print(f"    > Script conversione salvato nel database PostgreSQL")
+            
+        except Exception as e:
+            print(f"    ❌ Errore salvataggio script conversione: {e}")
+            raise
+    
     def save_to_postgresql_single(self, results, db_config):
-        """🆕 Salva i risultati di un singolo database nel database PostgreSQL - OTTIMIZZATO MEMORIA"""
+        """🆕 Salva i risultati di un singolo database nel database PostgreSQL - OTTIMIZZATO MEMORIA + CONVERSIONE"""
         try:
             connection_name = results.get('connection_name')
             if not connection_name:
@@ -2772,6 +3145,23 @@ DEBUG           0
                 
                 print(f"      > Inserito record ptd_ora2pg_estimates")
             
+            # 🆕 INSERISCI SCRIPT CONVERSIONE
+            if 'conversion_script' in results:
+                cursor.execute("""
+                    INSERT INTO oracle_migration.pdt_db_conversion_script 
+                    (connection_id, schema_name, conversion_script, has_errors, error_details, script_file_path)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (
+                    connection_id,
+                    target_schema,
+                    results['conversion_script']['script_content'],
+                    results['conversion_script']['has_errors'],
+                    results['conversion_script'].get('error_details'),
+                    results['conversion_script'].get('script_file')
+                ))
+                total_records += 1
+                print(f"      > Inserito script conversione")
+            
             # 🆕 INSERISCI DATI DIMENSIONI CON PREFISSI DBA/NON-DBA E QUERY TABLESPACE AGGIORNATE
             if self.analyze_sizes and 'size_data' in results:
                 size_data = results['size_data']
@@ -2880,7 +3270,7 @@ DEBUG           0
             traceback.print_exc()
     
     def create_lightweight_summary_data(self, results, db_config):
-        """🆕 Crea dati summary leggeri invece di mantenere tutto in memoria"""
+        """🆕 Crea dati summary leggeri invece di mantenere tutto in memoria + conversione - CORRETTO"""
         # Estrai solo i dati essenziali per il summary
         lightweight_data = {
             'connection_name': results.get('connection_name'),
@@ -2915,10 +3305,18 @@ DEBUG           0
                 'target_schema': results['ora2pg_metrics'].get('target_schema', 'auto')
             }
         
+        # 🔧 CORREZIONE: Info conversione script
+        if results.get('conversion_script') and results['conversion_script'].get('script_content'):
+            lightweight_data['conversion_script_generated'] = True
+            lightweight_data['conversion_has_errors'] = results['conversion_script'].get('has_errors', False)
+        elif self.generate_conversion_scripts and 'schema' in db_config and db_config['schema']:
+            # Se è abilitata e schema presente ma non generato = errore
+            lightweight_data['conversion_script_generated'] = False
+        
         return lightweight_data
     
     def analyze_database(self, db_config):
-        """🆕 Analizza un singolo database Oracle con gestione memoria ottimizzata"""
+        """🆕 Analizza un singolo database Oracle con gestione memoria ottimizzata + conversione script"""
         connection_name = db_config['connection_name']
         
         # Verifica se DSN è presente
@@ -2948,6 +3346,11 @@ DEBUG           0
             print(f"📝 Descrizione: {db_config['description']}")
         if 'schema' in db_config:
             print(f"🎯 Schema ora2pg configurato: {db_config['schema']}")
+        if self.generate_conversion_scripts:
+            if 'schema' in db_config and db_config['schema']:
+                print(f"🔧 Conversione script: ABILITATA per schema {db_config['schema']}")
+            else:
+                print(f"🔧 Conversione script: DISABILITATA (schema mancante)")
         print(f"{'='*70}")
         
         results = {
@@ -3049,6 +3452,24 @@ DEBUG           0
                 mode_desc = f"schema: {target_schema}" if target_schema != 'auto' else ("DB completo" if ora2pg_results.get('dba_mode') else "solo schema")
                 print(f"  ✅ Analisi ora2pg completata ({mode_desc}) - Costo: {ora2pg_results.get('total_cost', 'N/A')}")
             
+            # 🆕 ESEGUI CONVERSIONE SCRIPT (se abilitata)
+            if self.generate_conversion_scripts:
+                print(f"  🔧 Esecuzione conversione script database...")
+                conversion_results = self.run_ora2pg_conversion(
+                    db_config['dsn'],
+                    db_config['user'],
+                    db_config['password'],
+                    connection_name,
+                    db_config
+                )
+                if conversion_results:
+                    results['conversion_script'] = conversion_results
+                    status = "con errori" if conversion_results['has_errors'] else "senza errori"
+                    print(f"  ✅ Conversione script completata ({status})")
+                    print(f"      - Dimensione script: {len(conversion_results['script_content'])} caratteri")
+                else:
+                    print(f"  ⚠️  Conversione script fallita o saltata")
+            
             # ==========================================
             # 🆕 SEZIONE: SCRITTURA IMMEDIATA IN POSTGRESQL
             # ==========================================
@@ -3099,7 +3520,7 @@ DEBUG           0
         return results
 
     def run_analysis(self):
-        """🆕 Esegue l'analisi per tutti i database configurati - OTTIMIZZATO MEMORIA"""
+        """🆕 Esegue l'analisi per tutti i database configurati - OTTIMIZZATO MEMORIA + CONVERSIONE"""
         print(f"\n🚀 INIZIO ANALISI MULTI-DATABASE - ELABORAZIONE SEQUENZIALE OTTIMIZZATA")
         print(f"📅 Data/ora: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"📁 Output directory: {self.output_dir}")
@@ -3107,7 +3528,8 @@ DEBUG           0
         print(f"📊 Formato output: {'Excel ✅' if self.generate_excel else ''}{'CSV ✅' if self.generate_csv else ''}")
         print(f"📋 Output ora2pg: {self.ora2pg_output_mode}")
         print(f"📏 Analisi dimensioni: {'Abilitata ✅' if self.analyze_sizes else 'Disabilitata ❌'}")
-        print(f"🗄️  Database PostgreSQL: Prefissi completi (pdt_dep_dba_/pdt_dep_nodba_, pdt_sizes_dba_/pdt_sizes_nodba_, ptd_)")
+        print(f"🔧 Conversione script: {'Abilitata ✅' if self.generate_conversion_scripts else 'Disabilitata ❌'}")
+        print(f"🗄️  Database PostgreSQL: Prefissi completi (pdt_dep_dba_/pdt_dep_nodba_, pdt_sizes_dba_/pdt_sizes_nodba_, ptd_, pdt_db_conversion_script)")
         print(f"🔍 Rilevamento privilegi DBA: Automatico/Configurazione")
         print(f"🎯 Query differenziate: DBA vs NON-DBA per dipendenze e dimensioni")
         print(f"🔧 ORA2PG: Schema configurabile per connessione, fallback logica DBA/NON-DBA")
@@ -3115,6 +3537,7 @@ DEBUG           0
         print(f"🗃️  schema_name nelle tabelle ora2pg = schema configurato nel JSON")
         print(f"🔧 MODIFICHE: File Excel specifici disattivati, naming con schema invece di username")
         print(f"🆕 NUOVO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB")
+        print(f"🆕 CONVERSIONE: Script database (TABLE, VIEW, SEQUENCE) tramite ora2pg")
         print(f"🧹 OTTIMIZZAZIONE MEMORIA: File temporaneo per summary, garbage collection, dati leggeri")
         
         successful_analyses = 0
@@ -3173,7 +3596,8 @@ DEBUG           0
         print(f"📊 Formato output: {'Excel ✅' if self.generate_excel else ''}{'CSV ✅' if self.generate_csv else ''}")
         print(f"📋 Output ora2pg: {self.ora2pg_output_mode}")
         print(f"📏 Analisi dimensioni: {'Abilitata ✅' if self.analyze_sizes else 'Disabilitata ❌'}")
-        print(f"🗄️  Database PostgreSQL: Prefissi completi (pdt_dep_dba_/pdt_dep_nodba_, pdt_sizes_dba_/pdt_sizes_nodba_, ptd_)")
+        print(f"🔧 Conversione script: {'Abilitata ✅' if self.generate_conversion_scripts else 'Disabilitata ❌'}")
+        print(f"🗄️  Database PostgreSQL: Prefissi completi (pdt_dep_dba_/pdt_dep_nodba_, pdt_sizes_dba_/pdt_sizes_nodba_, ptd_, pdt_db_conversion_script)")
         print(f"🔍 Rilevamento privilegi DBA: Implementato con query differenziate")
         print(f"🎯 Query ottimizzate: DBA (tutti gli schemi) vs NON-DBA (solo schema utente)")
         print(f"🔧 ORA2PG: Schema configurabile per connessione, fallback logica DBA/NON-DBA")
@@ -3182,9 +3606,11 @@ DEBUG           0
         print(f"🔧 Correzione: Usato 'owner' invece di 'table_schema' nelle query dba_tab_privs/all_tab_privs")
         print(f"🔧 MODIFICHE APPLICATE: File Excel specifici disattivati, naming con schema invece di username")
         print(f"🆕 NUOVO FLUSSO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB")
+        print(f"🆕 CONVERSIONE: Script database (TABLE, VIEW, SEQUENCE) tramite ora2pg")
         print(f"⚡ VANTAGGI: Scrittura immediata, nessuna perdita dati in caso di interruzione")
         print(f"🧹 OTTIMIZZAZIONE MEMORIA: File temporaneo summary, garbage collection, dati leggeri")
         print(f"📊 MEMORIA: Utilizzo costante indipendente dal numero di database")
+        print(f"🔧 CONVERSIONE: Script salvati in database e file fisici con gestione errori")
         print(f"{'='*70}")
         
         # Lista file generati
@@ -3201,9 +3627,10 @@ def main():
     print("📋 Versione con query tablespace aggiornate, schema configurabile ora2pg, correzione query dba_tab_privs")
     print("🔧 MODIFICHE: File Excel specifici disattivati, naming con schema invece di username")
     print("🆕 NUOVO: Elaborazione sequenziale - per ogni DB: analisi -> file -> scrittura DB")
+    print("🆕 CONVERSIONE: Script database (TABLE, VIEW, SEQUENCE) tramite ora2pg")
     print("🧹 OTTIMIZZAZIONE MEMORIA: Gestione memoria ottimizzata per grandi volumi")
     
-    parser = argparse.ArgumentParser(description='Oracle Multi-Database Dependency Analyzer - Memory Optimized')
+    parser = argparse.ArgumentParser(description='Oracle Multi-Database Dependency Analyzer - Memory Optimized + Conversion')
     parser.add_argument(
         '--config', 
         default='oracle_connections.json',
@@ -3229,6 +3656,11 @@ def main():
         action='store_true',
         help='Disabilita analisi dimensioni (default: abilitata)'
     )
+    parser.add_argument(
+        '--no-conversion',
+        action='store_true',
+        help='Disabilita conversione script database (default: da config)'
+    )
     
     args = parser.parse_args()
     
@@ -3253,6 +3685,10 @@ def main():
         if args.no_sizes:
             analyzer.analyze_sizes = False
             print("📏 Analisi dimensioni disabilitata da parametro command line")
+            
+        if args.no_conversion:
+            analyzer.generate_conversion_scripts = False
+            print("🔧 Conversione script disabilitata da parametro command line")
         
         # Esegui analisi con nuovo flusso sequenziale ottimizzato
         analyzer.run_analysis()
