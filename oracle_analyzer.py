@@ -28,7 +28,7 @@ from openpyxl.utils.dataframe import dataframe_to_rows
 import pandas as pd
 import gc  # 🆕 Garbage collector per liberare memoria
 
-# Fix encoding per Windows
+# Fix encoding per Windows    
 import locale
 if sys.platform == 'win32':
     # Forza UTF-8 su Windows
